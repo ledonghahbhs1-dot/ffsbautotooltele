@@ -160,18 +160,25 @@ async def ask_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     def run_batch():
+        import asyncio
         from telegram import Bot
+
+        # Tạo event loop riêng cho thread này (v20 dùng async hoàn toàn)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
         def send(text, markdown=False):
             try:
-                bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode="Markdown" if markdown else None,
+                loop.run_until_complete(
+                    bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode="Markdown" if markdown else None,
+                    )
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Lỗi gửi tin nhắn: {e}")
 
         def progress(msg):
             send(msg)
@@ -219,6 +226,8 @@ async def ask_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if count > 1:
             send(f"🎉 *Hoàn tất tất cả {count} tài khoản!*", markdown=True)
+
+        loop.close()
 
     thread = threading.Thread(target=run_batch, daemon=True)
     thread.start()
