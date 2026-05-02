@@ -4,21 +4,17 @@ import string
 import os
 import logging
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = os.environ.get("BASE_URL", "")
-STK = os.environ.get("STK", "")
-BANK_NAME = os.environ.get("BANK_NAME", "")
+BASE_URL      = os.environ.get("BASE_URL", "")
 WITHDRAW_PASS = os.environ.get("WITHDRAW_PASS", "")
-FULL_NAME = os.environ.get("FULL_NAME", "")
 
 
 def generate_random_user():
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
-    user = f"user{suffix}"
-    phone = "8" + "".join(random.choices(string.digits, k=8))
+    user   = f"user{suffix}"
+    phone  = "8" + "".join(random.choices(string.digits, k=8))
     return user, phone
 
 
@@ -33,19 +29,21 @@ def get_driver():
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
     )
-    driver = webdriver.Chrome(options=options)
-    return driver
+    chrome_bin = os.environ.get("CHROME_BIN", "")
+    if chrome_bin:
+        options.binary_location = chrome_bin
+    return webdriver.Chrome(options=options)
 
 
-def run_account_creation(progress_callback=None):
+def run_account_creation(full_name: str, stk: str, bank_name: str, progress_callback=None):
     user, phone = generate_random_user()
     result = {
         "username": user,
-        "phone": phone,
+        "phone":    phone,
         "password": "MatKhauManh123@",
-        "steps": [],
-        "success": False,
-        "error": None,
+        "steps":    [],
+        "success":  False,
+        "error":    None,
     }
 
     driver = None
@@ -77,14 +75,12 @@ def run_account_creation(progress_callback=None):
                 if (input) {{
                     input.value = val;
                     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    return true;
                 }}
-                return false;
             }}
             fillField("Tên tài khoản", "{user}");
             fillField("mật khẩu", "MatKhauManh123@");
             fillField("SĐT", "{phone}");
-            fillField("Họ và Tên", "{FULL_NAME}");
+            fillField("Họ và Tên", "{full_name}");
             setTimeout(() => {{
                 let cb = document.querySelector('input[type="checkbox"]');
                 if (cb && !cb.checked) powerTouch(cb);
@@ -143,7 +139,7 @@ def run_account_creation(progress_callback=None):
 
         # ── BƯỚC 3: THÊM TÀI KHOẢN NGÂN HÀNG ────────────────────
         if progress_callback:
-            progress_callback("🏦 Bước 3: Thêm tài khoản ngân hàng...")
+            progress_callback(f"🏦 Bước 3: Thêm ngân hàng {bank_name}...")
 
         driver.get(f"{BASE_URL}/home/security?active=4")
         time.sleep(3)
@@ -171,9 +167,9 @@ def run_account_creation(progress_callback=None):
                     el => el.innerText && el.innerText.trim().includes('Thêm'));
                 if (addBtn) powerTouch(addBtn);
                 await sleep(1500);
-                fillField("Tên ngân hàng", "{BANK_NAME}");
-                fillField("Số tài khoản", "{STK}");
-                fillField("Họ và Tên", "{FULL_NAME}");
+                fillField("Tên ngân hàng", "{bank_name}");
+                fillField("Số tài khoản", "{stk}");
+                fillField("Họ và Tên", "{full_name}");
                 await sleep(500);
                 let confirmBtn = Array.from(document.querySelectorAll('div, button')).find(
                     el => el.innerText && (
@@ -187,12 +183,12 @@ def run_account_creation(progress_callback=None):
         """
         driver.execute_script(js_add_bank)
         time.sleep(4)
-        result["steps"].append("✅ Bước 3: Thêm ngân hàng xong")
+        result["steps"].append(f"✅ Bước 3: Thêm {bank_name} xong")
 
         result["success"] = True
 
     except Exception as e:
-        logger.error(f"Lỗi trong quá trình tự động: {e}")
+        logger.error(f"Lỗi automation: {e}")
         result["error"] = str(e)
     finally:
         if driver:
