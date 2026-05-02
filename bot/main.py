@@ -202,12 +202,28 @@ async def ask_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     markdown=True,
                 )
 
+            def send_screenshot(b64_data, caption=""):
+                if not b64_data:
+                    return
+                try:
+                    import io, base64
+                    loop.run_until_complete(
+                        bot.send_photo(
+                            chat_id=chat_id,
+                            photo=io.BytesIO(base64.b64decode(b64_data)),
+                            caption=caption,
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Lỗi gửi ảnh: {e}")
+
             result = run_account_creation(
                 full_name=full_name,
                 stk=stk,
                 bank_name=bank_name,
                 progress_callback=progress,
                 on_credentials_ready=on_creds,
+                screenshot_callback=send_screenshot,
             )
 
             if result["success"]:
