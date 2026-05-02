@@ -1,11 +1,15 @@
 import os
 import logging
 import threading
-from telegram import Update, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
     ContextTypes,
+    filters,
 )
 from automation import run_account_creation
 
@@ -17,13 +21,21 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-# Tập hợp chat_id được phép dùng bot (để trống = cho phép tất cả)
 ALLOWED_USERS_STR = os.environ.get("ALLOWED_USERS", "")
 ALLOWED_USERS = (
     set(int(x.strip()) for x in ALLOWED_USERS_STR.split(",") if x.strip())
-    if ALLOWED_USERS_STR
-    else set()
+    if ALLOWED_USERS_STR else set()
 )
+
+# Conversation states
+ASK_COUNT, ASK_FULL_NAME, ASK_STK, ASK_BANK = range(4)
+
+BANKS = [
+    "Vietcombank", "Vietinbank", "BIDV", "Agribank",
+    "MB Bank", "Techcombank", "VPBank", "ACB",
+    "Sacombank", "TPBank", "OCB", "SHB",
+    "HDBank", "VIB", "MSB", "SeABank",
+]
 
 
 def is_allowed(update: Update) -> bool:
@@ -32,13 +44,28 @@ def is_allowed(update: Update) -> bool:
     return update.effective_user.id in ALLOWED_USERS
 
 
+def bank_keyboard():
+    buttons = []
+    row = []
+    for i, bank in enumerate(BANKS):
+        row.append(InlineKeyboardButton(bank, callback_data=f"bank:{bank}"))
+        if (i + 1) % 3 == 0:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
+
+
+# ── /start ─────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Xin chào! Đây là bot tự động tạo tài khoản.\n\n"
+        "👋 Xin chào! Bot tự động tạo tài khoản.\n\n"
         "📋 *Lệnh có sẵn:*\n"
         "• /taotaikhoan — Tạo 1 tài khoản mới\n"
-        "• /taonhieu <số> — Tạo nhiều tài khoản (tối đa 10)\n"
-        "• /help — Hướng dẫn sử dụng",
+        "• /taonhieu — Tạo nhiều tài khoản\n"
+        "• /huy — Huỷ thao tác hiện tại\n"
+        "• /help — Hướng dẫn",
         parse_mode="Markdown",
     )
 
@@ -46,87 +73,144 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Hướng dẫn sử dụng*\n\n"
-        "1️⃣ /taotaikhoan\n"
-        "   → Tự động tạo 1 tài khoản ngẫu nhiên,\n"
-        "     cài PIN bảo mật và thêm ngân hàng.\n\n"
-        "2️⃣ /taonhieu <số>\n"
-        "   → Tạo nhiều tài khoản liên tiếp.\n"
-        "   Ví dụ: /taonhieu 3\n\n"
-        "⚠️ Mỗi lần tạo mất khoảng 30-45 giây.",
+        "1️⃣ /taotaikhoan — Tạo 1 tài khoản\n"
+        "2️⃣ /taonhieu — Tạo nhiều tài khoản liên tiếp\n\n"
+        "Bot sẽ hỏi:\n"
+        "• Họ và tên đầy đủ\n"
+        "• Số tài khoản ngân hàng\n"
+        "• Chọn ngân hàng từ danh sách\n\n"
+        "⚠️ Mỗi tài khoản mất khoảng 30–45 giây.",
         parse_mode="Markdown",
     )
 
 
-def _run_and_notify(chat_id: int, token: str, index: int = 1, total: int = 1):
-    bot = Bot(token=token)
-    messages = []
-
-    def progress(msg):
-        try:
-            bot.send_message(chat_id=chat_id, text=msg)
-        except Exception:
-            pass
-
-    header = f"🤖 *Tạo tài khoản {index}/{total}*" if total > 1 else "🤖 *Bắt đầu tạo tài khoản...*"
-    bot.send_message(chat_id=chat_id, text=header, parse_mode="Markdown")
-
-    result = run_account_creation(progress_callback=progress)
-
-    if result["success"]:
-        summary = (
-            f"✅ *Tài khoản {index}/{total} thành công!*\n\n"
-            f"👤 Tài khoản: `{result['username']}`\n"
-            f"📱 SĐT: `{result['phone']}`\n"
-            f"🔑 Mật khẩu: `{result['password']}`\n\n"
-            + "\n".join(result["steps"])
-        )
-    else:
-        summary = (
-            f"❌ *Tài khoản {index}/{total} thất bại!*\n\n"
-            f"Lỗi: {result.get('error', 'Không xác định')}\n\n"
-            + "\n".join(result["steps"])
-        )
-
-    bot.send_message(chat_id=chat_id, text=summary, parse_mode="Markdown")
-
-
+# ── Bắt đầu luồng tạo tài khoản ───────────────────────────────────
 async def tao_tai_khoan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         await update.message.reply_text("⛔ Bạn không có quyền dùng bot này.")
-        return
-
-    await update.message.reply_text("⏳ Đang bắt đầu tạo tài khoản, vui lòng chờ...")
-
-    thread = threading.Thread(
-        target=_run_and_notify,
-        args=(update.effective_chat.id, TELEGRAM_BOT_TOKEN, 1, 1),
-        daemon=True,
-    )
-    thread.start()
+        return ConversationHandler.END
+    context.user_data["count"] = 1
+    await update.message.reply_text("✍️ Nhập *Họ và Tên đầy đủ*:", parse_mode="Markdown")
+    return ASK_FULL_NAME
 
 
 async def tao_nhieu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         await update.message.reply_text("⛔ Bạn không có quyền dùng bot này.")
-        return
-
-    try:
-        count = int(context.args[0]) if context.args else 1
-        count = max(1, min(count, 10))
-    except (ValueError, IndexError):
-        await update.message.reply_text("❌ Sử dụng: /taonhieu <số> (tối đa 10)\nVí dụ: /taonhieu 3")
-        return
-
+        return ConversationHandler.END
     await update.message.reply_text(
-        f"⏳ Sẽ tạo {count} tài khoản liên tiếp. Mỗi tài khoản mất ~30-45 giây..."
+        "🔢 Muốn tạo bao nhiêu tài khoản? (nhập số từ 1–10)"
+    )
+    return ASK_COUNT
+
+
+async def ask_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.isdigit() or not (1 <= int(text) <= 10):
+        await update.message.reply_text("❌ Vui lòng nhập số từ 1 đến 10.")
+        return ASK_COUNT
+    context.user_data["count"] = int(text)
+    await update.message.reply_text("✍️ Nhập *Họ và Tên đầy đủ*:", parse_mode="Markdown")
+    return ASK_FULL_NAME
+
+
+async def ask_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    full_name = update.message.text.strip()
+    if len(full_name) < 3:
+        await update.message.reply_text("❌ Tên quá ngắn. Vui lòng nhập lại:")
+        return ASK_FULL_NAME
+    context.user_data["full_name"] = full_name
+    await update.message.reply_text("🏦 Nhập *Số tài khoản ngân hàng* (STK):", parse_mode="Markdown")
+    return ASK_STK
+
+
+async def ask_stk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stk = update.message.text.strip()
+    if not stk.isdigit() or len(stk) < 6:
+        await update.message.reply_text("❌ STK không hợp lệ. Chỉ nhập số (tối thiểu 6 chữ số):")
+        return ASK_STK
+    context.user_data["stk"] = stk
+    await update.message.reply_text(
+        "🏛️ Chọn *Ngân hàng* của bạn:",
+        parse_mode="Markdown",
+        reply_markup=bank_keyboard(),
+    )
+    return ASK_BANK
+
+
+async def ask_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    bank_name = query.data.replace("bank:", "")
+    context.user_data["bank_name"] = bank_name
+
+    full_name = context.user_data["full_name"]
+    stk = context.user_data["stk"]
+    count = context.user_data.get("count", 1)
+    chat_id = update.effective_chat.id
+
+    await query.edit_message_text(
+        f"✅ Đã chọn: *{bank_name}*\n\n"
+        f"👤 Họ tên: {full_name}\n"
+        f"💳 STK: {stk}\n"
+        f"🔢 Số tài khoản cần tạo: {count}\n\n"
+        f"⏳ Bắt đầu xử lý...",
+        parse_mode="Markdown",
     )
 
     def run_batch():
+        from telegram import Bot
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+        def progress(msg):
+            try:
+                bot.send_message(chat_id=chat_id, text=msg)
+            except Exception:
+                pass
+
         for i in range(1, count + 1):
-            _run_and_notify(update.effective_chat.id, TELEGRAM_BOT_TOKEN, i, count)
+            if count > 1:
+                bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🤖 *Tài khoản {i}/{count}*",
+                    parse_mode="Markdown",
+                )
+            result = run_account_creation(
+                full_name=full_name,
+                stk=stk,
+                bank_name=bank_name,
+                progress_callback=progress,
+            )
+            if result["success"]:
+                msg = (
+                    f"✅ *Thành công{f' ({i}/{count})' if count > 1 else ''}!*\n\n"
+                    f"👤 Tài khoản: `{result['username']}`\n"
+                    f"📱 SĐT: `{result['phone']}`\n"
+                    f"🔑 Mật khẩu: `{result['password']}`\n\n"
+                    + "\n".join(result["steps"])
+                )
+            else:
+                msg = (
+                    f"❌ *Thất bại{f' ({i}/{count})' if count > 1 else ''}!*\n\n"
+                    f"Lỗi: {result.get('error', 'Không xác định')}\n\n"
+                    + "\n".join(result["steps"])
+                )
+            bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+
+        if count > 1:
+            bot.send_message(chat_id=chat_id, text=f"🎉 Hoàn tất tất cả {count} tài khoản!")
 
     thread = threading.Thread(target=run_batch, daemon=True)
     thread.start()
+
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("🚫 Đã huỷ thao tác.")
+    return ConversationHandler.END
 
 
 def main():
@@ -135,10 +219,23 @@ def main():
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("taotaikhoan", tao_tai_khoan),
+            CommandHandler("taonhieu", tao_nhieu),
+        ],
+        states={
+            ASK_COUNT:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_count)],
+            ASK_FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_full_name)],
+            ASK_STK:       [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_stk)],
+            ASK_BANK:      [CallbackQueryHandler(ask_bank, pattern="^bank:")],
+        },
+        fallbacks=[CommandHandler("huy", cancel)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("taotaikhoan", tao_tai_khoan))
-    app.add_handler(CommandHandler("taonhieu", tao_nhieu))
+    app.add_handler(conv)
 
     logger.info("Bot đang chạy...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
