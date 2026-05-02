@@ -49,7 +49,13 @@ def get_driver():
     return webdriver.Chrome(options=options)
 
 
-def run_account_creation(full_name: str, stk: str, bank_name: str, progress_callback=None):
+def run_account_creation(
+    full_name: str,
+    stk: str,
+    bank_name: str,
+    progress_callback=None,
+    on_credentials_ready=None,
+):
     user, phone = generate_random_user()
     password = generate_password()
     result = {
@@ -60,6 +66,10 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
         "success":  False,
         "error":    None,
     }
+
+    # Gửi thông tin đăng nhập ngay khi tạo ra (trước khi chạy trình duyệt)
+    if on_credentials_ready:
+        on_credentials_ready(user, phone, password)
 
     driver = None
     try:
