@@ -2,6 +2,7 @@ import time
 import random
 import string
 import os
+import base64
 import logging
 from selenium import webdriver
 
@@ -14,16 +15,12 @@ WITHDRAW_PASS = os.environ.get("WITHDRAW_PASS", "")
 def generate_random_user():
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
     user  = f"mem{suffix}"
-    # Site dùng prefix +84, ô nhập chỉ cần phần sau: 9xxxxxxxx (9 chữ số)
+    # fly88h.com dùng +84, ô nhập chỉ cần phần sau: 9xxxxxxxx
     phone = "9" + "".join(random.choices(string.digits, k=8))
     return user, phone
 
 
 def generate_password():
-    """
-    Tạo mật khẩu ngẫu nhiên 10 ký tự, đảm bảo có đủ:
-    chữ cái + số + ký hiệu (thỏa mãn yêu cầu 6-16 ký tự, 2+ loại ký tự)
-    """
     letters  = random.choices(string.ascii_letters, k=5)
     digits   = random.choices(string.digits, k=3)
     symbols  = random.choices("@#$!%&*", k=2)
@@ -49,12 +46,21 @@ def get_driver():
     return webdriver.Chrome(options=options)
 
 
+def _screenshot_b64(driver) -> str:
+    """Chụp ảnh màn hình, trả về base64 PNG."""
+    try:
+        return base64.b64encode(driver.get_screenshot_as_png()).decode()
+    except Exception:
+        return ""
+
+
 def run_account_creation(
     full_name: str,
     stk: str,
     bank_name: str,
     progress_callback=None,
     on_credentials_ready=None,
+    screenshot_callback=None,
 ):
     user, phone = generate_random_user()
     password = generate_password()
@@ -67,7 +73,7 @@ def run_account_creation(
         "error":    None,
     }
 
-    # Gửi thông tin đăng nhập ngay khi tạo ra (trước khi chạy trình duyệt)
+    # Gửi thông tin đăng nhập ngay khi tạo (trước khi mở browser)
     if on_credentials_ready:
         on_credentials_ready(user, phone, password)
 
@@ -78,7 +84,7 @@ def run_account_creation(
 
         driver = get_driver()
 
-        # Import captcha solver (lazy — không crash nếu chưa có API key)
+        # Lazy import captcha solver
         try:
             from captcha_solver import solve_captcha_on_page
             captcha_enabled = True
@@ -88,12 +94,12 @@ def run_account_creation(
 
         # ── BƯỚC 1: ĐĂNG KÝ ──────────────────────────────────────
         if progress_callback:
-            progress_callback(f"📝 Bước 1: Điền form đăng ký cho [{user}]...")
+            progress_callback(f"📝 Bước 1: Điền form đăng ký [{user}]...")
 
         driver.get(f"{BASE_URL}/home/register")
         time.sleep(3)
 
-        js_step1 = f"""
+        driver.execute_script(f"""
             function fillField(p, v) {{
                 let input = document.querySelector(`input[placeholder*="${{p}}"]`);
                 if (input) {{
@@ -109,18 +115,15 @@ def run_account_creation(
                 el.dispatchEvent(new MouseEvent('mouseup', opt));
                 el.click();
             }}
-
             fillField("Tên tài khoản", "{user}");
             fillField("mật khẩu", "{password}");
             fillField("SĐT", "{phone}");
             fillField("Họ và Tên", "{full_name.upper()}");
-
             setTimeout(() => {{
                 let cb = document.querySelector('input[type="checkbox"]');
                 if (cb && !cb.checked) realClick(cb);
             }}, 400);
-        """
-        driver.execute_script(js_step1)
+        """)
         time.sleep(2)
 
         # ── XỬ LÝ CAPTCHA ─────────────────────────────────────────
@@ -129,20 +132,17 @@ def run_account_creation(
                 progress_callback("🧩 AI đang giải captcha...")
             try:
                 solved = solve_captcha_on_page(driver)
-                if solved:
-                    result["steps"].append("✅ Captcha: AI giải thành công")
-                    if progress_callback:
-                        progress_callback("✅ Captcha đã giải xong!")
-                else:
-                    result["steps"].append("⚠️ Không tìm thấy captcha, tiếp tục")
+                status = "✅ Captcha: AI giải thành công" if solved else "⚠️ Không tìm thấy captcha"
+                result["steps"].append(status)
+                if progress_callback:
+                    progress_callback(status)
             except Exception as e:
-                logger.error(f"Lỗi giải captcha: {e}")
                 result["steps"].append(f"⚠️ Captcha lỗi: {e}")
         else:
             if progress_callback:
                 progress_callback("🧩 Chờ captcha (15 giây)...")
             time.sleep(15)
-            result["steps"].append("⏳ Captcha: chờ thủ công 15 giây")
+            result["steps"].append("⏳ Captcha: chờ 15 giây")
 
         # Nhấn ĐĂNG KÝ
         driver.execute_script("""
@@ -155,8 +155,28 @@ def run_account_creation(
                 btn.click();
             }
         """)
-        time.sleep(3)
-        result["steps"].append("✅ Bước 1: Đăng ký xong")
+        time.sleep(4)
+
+        # ── XÁC NHẬN ĐĂNG KÝ THÀNH CÔNG ──────────────────────────
+        current_url = driver.current_url
+        page_text   = driver.find_element("tag name", "body").text[:500]
+
+        # Chụp ảnh gửi Telegram để debug
+        if screenshot_callback:
+            screenshot_callback(_screenshot_b64(driver), "📸 Sau bước đăng ký")
+
+        if "register" in current_url:
+            # Vẫn còn trên trang đăng ký → thất bại
+            error_el = driver.execute_script(
+                "return Array.from(document.querySelectorAll('.van-toast, .error, [class*=error], [class*=toast]'))"
+                ".map(e=>e.innerText).filter(Boolean).join(' | ');"
+            )
+            err_msg = error_el or "Vẫn ở trang đăng ký (có thể captcha sai hoặc tên đã tồn tại)"
+            result["steps"].append(f"❌ Bước 1: {err_msg}")
+            result["error"] = err_msg
+            return result
+        else:
+            result["steps"].append(f"✅ Bước 1: Đăng ký thành công (URL: {current_url.split('/')[-1]})")
 
         # ── BƯỚC 2: CÀI MÃ PIN ───────────────────────────────────
         if progress_callback:
@@ -165,7 +185,7 @@ def run_account_creation(
         driver.get(f"{BASE_URL}/home/security?active=5")
         time.sleep(3)
 
-        js_step2 = f"""
+        driver.execute_script(f"""
             async function setPin() {{
                 function realClick(el) {{
                     const opt = {{ bubbles: true, cancelable: true, view: window }};
@@ -177,7 +197,6 @@ def run_account_creation(
                 let area = document.querySelector('.van-password-input') || document.querySelector('ul');
                 if (area) realClick(area);
                 await new Promise(r => setTimeout(r, 800));
-
                 for (let n of "{WITHDRAW_PASS}{WITHDRAW_PASS}") {{
                     let k = Array.from(document.querySelectorAll('i, span, div, li')).find(
                         e => e.textContent.trim() === n && e.offsetParent !== null);
@@ -190,9 +209,12 @@ def run_account_creation(
                 }}, 500);
             }}
             setPin();
-        """
-        driver.execute_script(js_step2)
+        """)
         time.sleep(4)
+
+        if screenshot_callback:
+            screenshot_callback(_screenshot_b64(driver), "📸 Sau bước cài PIN")
+
         result["steps"].append("✅ Bước 2: Cài mã PIN xong")
 
         # ── BƯỚC 3: LIÊN KẾT NGÂN HÀNG ───────────────────────────
@@ -202,9 +224,9 @@ def run_account_creation(
         driver.get(f"{BASE_URL}/home/withdraw?active=10")
         time.sleep(3)
 
-        js_step3 = f"""
+        driver.execute_script(f"""
             async function linkBank() {{
-                const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                const sleep = ms => new Promise(r => setTimeout(r, ms));
                 function powerTouch(el) {{
                     const opt = {{ bubbles: true, cancelable: true, view: window }};
                     el.dispatchEvent(new PointerEvent('pointerdown', opt));
@@ -213,28 +235,20 @@ def run_account_creation(
                     el.dispatchEvent(new MouseEvent('mouseup', opt));
                     el.click();
                 }}
-
-                // Nhấn "Thêm Vào"
                 let btnAdd = Array.from(document.querySelectorAll('div, span')).find(
                     e => e.innerText && e.innerText.trim() === 'Thêm Vào');
                 if (btnAdd) powerTouch(btnAdd);
                 await sleep(1200);
-
-                // Nhập PIN để xác thực
                 for (let n of "{WITHDRAW_PASS}") {{
                     let k = Array.from(document.querySelectorAll('i, span, div, li')).find(
                         e => e.textContent.trim() === n && e.offsetParent !== null);
                     if (k) {{ powerTouch(k); await sleep(200); }}
                 }}
                 await sleep(1000);
-
-                // Tiếp theo
                 let next = Array.from(document.querySelectorAll('div, button')).find(
                     e => e.innerText && e.innerText.trim() === 'Tiếp theo');
                 if (next) powerTouch(next);
                 await sleep(2500);
-
-                // Điền số tài khoản (dùng valueTracker cho React)
                 let inp = document.querySelector('input[placeholder*="số tài khoản"]')
                        || document.querySelector('input[placeholder*="Số tài khoản"]');
                 if (inp) {{
@@ -244,8 +258,6 @@ def run_account_creation(
                     inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 }}
-
-                // Chọn ngân hàng từ picker
                 let sel = Array.from(document.querySelectorAll('div, span')).find(
                     e => e.innerText && e.innerText.includes('Chọn ngân hàng'));
                 if (sel) {{
@@ -262,23 +274,25 @@ def run_account_creation(
                     }}
                 }}
                 await sleep(1500);
-
-                // Xác nhận cuối
                 let final = Array.from(document.querySelectorAll('div, button')).find(
                     e => e.innerText && e.innerText.trim() === 'Xác Nhận');
                 if (final) powerTouch(final);
             }}
             linkBank();
-        """
-        driver.execute_script(js_step3)
+        """)
         time.sleep(5)
-        result["steps"].append(f"✅ Bước 3: Liên kết {bank_name} xong")
 
+        if screenshot_callback:
+            screenshot_callback(_screenshot_b64(driver), "📸 Sau bước liên kết ngân hàng")
+
+        result["steps"].append(f"✅ Bước 3: Liên kết {bank_name} xong")
         result["success"] = True
 
     except Exception as e:
         logger.error(f"Lỗi automation: {e}")
         result["error"] = str(e)
+        if driver and screenshot_callback:
+            screenshot_callback(_screenshot_b64(driver), f"📸 Lỗi: {e}")
     finally:
         if driver:
             driver.quit()
