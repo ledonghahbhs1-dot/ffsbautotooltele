@@ -13,8 +13,8 @@ WITHDRAW_PASS = os.environ.get("WITHDRAW_PASS", "")
 
 def generate_random_user():
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
-    user   = f"user{suffix}"
-    phone  = "8" + "".join(random.choices(string.digits, k=8))
+    user  = f"mem{suffix}"
+    phone = "09" + "".join(random.choices(string.digits, k=8))
     return user, phone
 
 
@@ -27,7 +27,7 @@ def get_driver():
     options.add_argument("--window-size=1280,800")
     options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     chrome_bin = os.environ.get("CHROME_BIN", "")
     if chrome_bin:
@@ -40,7 +40,7 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
     result = {
         "username": user,
         "phone":    phone,
-        "password": "MatKhauManh123@",
+        "password": "Pass123@abc",
         "steps":    [],
         "success":  False,
         "error":    None,
@@ -53,12 +53,12 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
 
         driver = get_driver()
 
-        # Import captcha solver (lazy import để tránh lỗi nếu chưa cài AI lib)
+        # Import captcha solver (lazy — không crash nếu chưa có API key)
         try:
             from captcha_solver import solve_captcha_on_page
             captcha_enabled = True
         except Exception as e:
-            logger.warning(f"Không load được captcha solver: {e}")
+            logger.warning(f"Captcha solver không khả dụng: {e}")
             captcha_enabled = False
 
         # ── BƯỚC 1: ĐĂNG KÝ ──────────────────────────────────────
@@ -68,33 +68,34 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
         driver.get(f"{BASE_URL}/home/register")
         time.sleep(3)
 
-        js_register = f"""
-            function powerTouch(el) {{
+        js_step1 = f"""
+            function fillField(p, v) {{
+                let input = document.querySelector(`input[placeholder*="${{p}}"]`);
+                if (input) {{
+                    input.value = v;
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }}
+            }}
+            function realClick(el) {{
                 if (!el) return;
                 const opt = {{ bubbles: true, cancelable: true, view: window }};
-                el.dispatchEvent(new PointerEvent('pointerdown', opt));
                 el.dispatchEvent(new MouseEvent('mousedown', opt));
-                el.dispatchEvent(new PointerEvent('pointerup', opt));
                 el.dispatchEvent(new MouseEvent('mouseup', opt));
                 el.click();
             }}
-            function fillField(placeholder, val) {{
-                let input = document.querySelector(`input[placeholder*="${{placeholder}}"]`);
-                if (input) {{
-                    input.value = val;
-                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                }}
-            }}
+
             fillField("Tên tài khoản", "{user}");
-            fillField("mật khẩu", "MatKhauManh123@");
+            fillField("mật khẩu", "Pass123@abc");
             fillField("SĐT", "{phone}");
             fillField("Họ và Tên", "{full_name}");
+
             setTimeout(() => {{
                 let cb = document.querySelector('input[type="checkbox"]');
-                if (cb && !cb.checked) powerTouch(cb);
+                if (cb && !cb.checked) realClick(cb);
             }}, 400);
         """
-        driver.execute_script(js_register)
+        driver.execute_script(js_step1)
         time.sleep(2)
 
         # ── XỬ LÝ CAPTCHA ─────────────────────────────────────────
@@ -108,9 +109,7 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
                     if progress_callback:
                         progress_callback("✅ Captcha đã giải xong!")
                 else:
-                    result["steps"].append("⚠️ Captcha: không tìm thấy, bỏ qua")
-                    if progress_callback:
-                        progress_callback("⚠️ Không tìm thấy captcha, tiếp tục...")
+                    result["steps"].append("⚠️ Không tìm thấy captcha, tiếp tục")
             except Exception as e:
                 logger.error(f"Lỗi giải captcha: {e}")
                 result["steps"].append(f"⚠️ Captcha lỗi: {e}")
@@ -120,17 +119,15 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
             time.sleep(15)
             result["steps"].append("⏳ Captcha: chờ thủ công 15 giây")
 
-        # Nhấn nút ĐĂNG KÝ
+        # Nhấn ĐĂNG KÝ
         driver.execute_script("""
-            let regBtn = Array.from(document.querySelectorAll('div, button')).find(
-                el => el.innerText && el.innerText.trim() === 'ĐĂNG KÝ');
-            if (regBtn) {
+            let btn = Array.from(document.querySelectorAll('div, button')).find(
+                e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ');
+            if (btn) {
                 const opt = { bubbles: true, cancelable: true, view: window };
-                regBtn.dispatchEvent(new PointerEvent('pointerdown', opt));
-                regBtn.dispatchEvent(new MouseEvent('mousedown', opt));
-                regBtn.dispatchEvent(new PointerEvent('pointerup', opt));
-                regBtn.dispatchEvent(new MouseEvent('mouseup', opt));
-                regBtn.click();
+                btn.dispatchEvent(new MouseEvent('mousedown', opt));
+                btn.dispatchEvent(new MouseEvent('mouseup', opt));
+                btn.click();
             }
         """)
         time.sleep(3)
@@ -143,87 +140,114 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
         driver.get(f"{BASE_URL}/home/security?active=5")
         time.sleep(3)
 
-        js_setup_pass = f"""
-            async function setupPass() {{
-                const sleep = ms => new Promise(r => setTimeout(r, ms));
-                function powerTouch(el) {{
-                    if (!el) return;
+        js_step2 = f"""
+            async function setPin() {{
+                function realClick(el) {{
                     const opt = {{ bubbles: true, cancelable: true, view: window }};
                     el.dispatchEvent(new PointerEvent('pointerdown', opt));
                     el.dispatchEvent(new TouchEvent('touchstart', opt));
-                    el.dispatchEvent(new MouseEvent('mousedown', opt));
-                    el.dispatchEvent(new PointerEvent('pointerup', opt));
+                    el.dispatchEvent(new MouseEvent('mouseup', opt));
+                    el.click();
+                }}
+                let area = document.querySelector('.van-password-input') || document.querySelector('ul');
+                if (area) realClick(area);
+                await new Promise(r => setTimeout(r, 800));
+
+                for (let n of "{WITHDRAW_PASS}{WITHDRAW_PASS}") {{
+                    let k = Array.from(document.querySelectorAll('i, span, div, li')).find(
+                        e => e.textContent.trim() === n && e.offsetParent !== null);
+                    if (k) {{ realClick(k); await new Promise(r => setTimeout(r, 200)); }}
+                }}
+                setTimeout(() => {{
+                    let ok = Array.from(document.querySelectorAll('div, button')).find(
+                        e => e.innerText && e.innerText.trim() === 'Xác Nhận');
+                    if (ok) ok.click();
+                }}, 500);
+            }}
+            setPin();
+        """
+        driver.execute_script(js_step2)
+        time.sleep(4)
+        result["steps"].append("✅ Bước 2: Cài mã PIN xong")
+
+        # ── BƯỚC 3: LIÊN KẾT NGÂN HÀNG ───────────────────────────
+        if progress_callback:
+            progress_callback(f"🏦 Bước 3: Liên kết ngân hàng {bank_name}...")
+
+        driver.get(f"{BASE_URL}/home/withdraw?active=10")
+        time.sleep(3)
+
+        js_step3 = f"""
+            async function linkBank() {{
+                const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                function powerTouch(el) {{
+                    const opt = {{ bubbles: true, cancelable: true, view: window }};
+                    el.dispatchEvent(new PointerEvent('pointerdown', opt));
+                    el.dispatchEvent(new TouchEvent('touchstart', opt));
                     el.dispatchEvent(new TouchEvent('touchend', opt));
                     el.dispatchEvent(new MouseEvent('mouseup', opt));
                     el.click();
                 }}
-                let inputArea = document.querySelector('.van-password-input') || document.querySelector('ul');
-                if (inputArea) powerTouch(inputArea);
-                await sleep(800);
-                const pass = "{WITHDRAW_PASS}";
-                for (let num of (pass + pass)) {{
-                    let key = Array.from(document.querySelectorAll('i, span, div, li')).find(
-                        el => el.textContent.trim() === num && el.offsetParent !== null);
-                    if (key) {{ powerTouch(key); await sleep(200); }}
+
+                // Nhấn "Thêm Vào"
+                let btnAdd = Array.from(document.querySelectorAll('div, span')).find(
+                    e => e.innerText && e.innerText.trim() === 'Thêm Vào');
+                if (btnAdd) powerTouch(btnAdd);
+                await sleep(1200);
+
+                // Nhập PIN để xác thực
+                for (let n of "{WITHDRAW_PASS}") {{
+                    let k = Array.from(document.querySelectorAll('i, span, div, li')).find(
+                        e => e.textContent.trim() === n && e.offsetParent !== null);
+                    if (k) {{ powerTouch(k); await sleep(200); }}
                 }}
-                await sleep(500);
-                let confirm = Array.from(document.querySelectorAll('div, button')).find(
-                    el => el.innerText && el.innerText.trim() === 'Xác Nhận');
-                if (confirm) powerTouch(confirm);
-            }}
-            setupPass();
-        """
-        driver.execute_script(js_setup_pass)
-        time.sleep(4)
-        result["steps"].append("✅ Bước 2: Cài mã PIN xong")
+                await sleep(1000);
 
-        # ── BƯỚC 3: THÊM TÀI KHOẢN NGÂN HÀNG ────────────────────
-        if progress_callback:
-            progress_callback(f"🏦 Bước 3: Thêm ngân hàng {bank_name}...")
+                // Tiếp theo
+                let next = Array.from(document.querySelectorAll('div, button')).find(
+                    e => e.innerText && e.innerText.trim() === 'Tiếp theo');
+                if (next) powerTouch(next);
+                await sleep(2500);
 
-        driver.get(f"{BASE_URL}/home/security?active=4")
-        time.sleep(3)
-
-        js_add_bank = f"""
-            async function addBank() {{
-                const sleep = ms => new Promise(r => setTimeout(r, ms));
-                function powerTouch(el) {{
-                    if (!el) return;
-                    const opt = {{ bubbles: true, cancelable: true, view: window }};
-                    el.dispatchEvent(new PointerEvent('pointerdown', opt));
-                    el.dispatchEvent(new MouseEvent('mousedown', opt));
-                    el.dispatchEvent(new PointerEvent('pointerup', opt));
-                    el.dispatchEvent(new MouseEvent('mouseup', opt));
-                    el.click();
+                // Điền số tài khoản (dùng valueTracker cho React)
+                let inp = document.querySelector('input[placeholder*="số tài khoản"]')
+                       || document.querySelector('input[placeholder*="Số tài khoản"]');
+                if (inp) {{
+                    let tracker = inp._valueTracker;
+                    if (tracker) tracker.setValue(inp.value);
+                    inp.value = "{stk}";
+                    inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 }}
-                function fillField(placeholder, val) {{
-                    let input = document.querySelector(`input[placeholder*="${{placeholder}}"]`);
-                    if (input) {{
-                        input.value = val;
-                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+
+                // Chọn ngân hàng từ picker
+                let sel = Array.from(document.querySelectorAll('div, span')).find(
+                    e => e.innerText && e.innerText.includes('Chọn ngân hàng'));
+                if (sel) {{
+                    powerTouch(sel);
+                    await sleep(1500);
+                    let target = Array.from(document.querySelectorAll('.van-picker-column__item, span')).find(
+                        e => e.innerText && e.innerText.trim() === "{bank_name}");
+                    if (target) {{
+                        powerTouch(target);
+                        await sleep(600);
+                        let ok = Array.from(document.querySelectorAll('button, div')).find(
+                            e => e.innerText && e.innerText.trim() === 'Xác nhận');
+                        if (ok) powerTouch(ok);
                     }}
                 }}
-                let addBtn = Array.from(document.querySelectorAll('div, button, span')).find(
-                    el => el.innerText && el.innerText.trim().includes('Thêm'));
-                if (addBtn) powerTouch(addBtn);
                 await sleep(1500);
-                fillField("Tên ngân hàng", "{bank_name}");
-                fillField("Số tài khoản", "{stk}");
-                fillField("Họ và Tên", "{full_name}");
-                await sleep(500);
-                let confirmBtn = Array.from(document.querySelectorAll('div, button')).find(
-                    el => el.innerText && (
-                        el.innerText.trim() === 'Xác Nhận' ||
-                        el.innerText.trim() === 'LƯU' ||
-                        el.innerText.trim() === 'Lưu'
-                    ));
-                if (confirmBtn) powerTouch(confirmBtn);
+
+                // Xác nhận cuối
+                let final = Array.from(document.querySelectorAll('div, button')).find(
+                    e => e.innerText && e.innerText.trim() === 'Xác Nhận');
+                if (final) powerTouch(final);
             }}
-            addBank();
+            linkBank();
         """
-        driver.execute_script(js_add_bank)
-        time.sleep(4)
-        result["steps"].append(f"✅ Bước 3: Thêm {bank_name} xong")
+        driver.execute_script(js_step3)
+        time.sleep(5)
+        result["steps"].append(f"✅ Bước 3: Liên kết {bank_name} xong")
 
         result["success"] = True
 
