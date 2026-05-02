@@ -53,6 +53,14 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
 
         driver = get_driver()
 
+        # Import captcha solver (lazy import để tránh lỗi nếu chưa cài AI lib)
+        try:
+            from captcha_solver import solve_captcha_on_page
+            captcha_enabled = True
+        except Exception as e:
+            logger.warning(f"Không load được captcha solver: {e}")
+            captcha_enabled = False
+
         # ── BƯỚC 1: ĐĂNG KÝ ──────────────────────────────────────
         if progress_callback:
             progress_callback(f"📝 Bước 1: Điền form đăng ký cho [{user}]...")
@@ -84,17 +92,49 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
             setTimeout(() => {{
                 let cb = document.querySelector('input[type="checkbox"]');
                 if (cb && !cb.checked) powerTouch(cb);
-                let regBtn = Array.from(document.querySelectorAll('div, button')).find(
-                    el => el.innerText.trim() === 'ĐĂNG KÝ');
-                if (regBtn) powerTouch(regBtn);
-            }}, 500);
+            }}, 400);
         """
         driver.execute_script(js_register)
-        result["steps"].append("✅ Bước 1: Điền form đăng ký xong")
+        time.sleep(2)
 
-        if progress_callback:
-            progress_callback("🧩 Chờ xử lý captcha (15 giây)...")
-        time.sleep(15)
+        # ── XỬ LÝ CAPTCHA ─────────────────────────────────────────
+        if captcha_enabled:
+            if progress_callback:
+                progress_callback("🧩 AI đang giải captcha...")
+            try:
+                solved = solve_captcha_on_page(driver)
+                if solved:
+                    result["steps"].append("✅ Captcha: AI giải thành công")
+                    if progress_callback:
+                        progress_callback("✅ Captcha đã giải xong!")
+                else:
+                    result["steps"].append("⚠️ Captcha: không tìm thấy, bỏ qua")
+                    if progress_callback:
+                        progress_callback("⚠️ Không tìm thấy captcha, tiếp tục...")
+            except Exception as e:
+                logger.error(f"Lỗi giải captcha: {e}")
+                result["steps"].append(f"⚠️ Captcha lỗi: {e}")
+        else:
+            if progress_callback:
+                progress_callback("🧩 Chờ captcha (15 giây)...")
+            time.sleep(15)
+            result["steps"].append("⏳ Captcha: chờ thủ công 15 giây")
+
+        # Nhấn nút ĐĂNG KÝ
+        driver.execute_script("""
+            let regBtn = Array.from(document.querySelectorAll('div, button')).find(
+                el => el.innerText && el.innerText.trim() === 'ĐĂNG KÝ');
+            if (regBtn) {
+                const opt = { bubbles: true, cancelable: true, view: window };
+                regBtn.dispatchEvent(new PointerEvent('pointerdown', opt));
+                regBtn.dispatchEvent(new MouseEvent('mousedown', opt));
+                regBtn.dispatchEvent(new PointerEvent('pointerup', opt));
+                regBtn.dispatchEvent(new MouseEvent('mouseup', opt));
+                regBtn.click();
+            }
+        """)
+        time.sleep(3)
+        result["steps"].append("✅ Bước 1: Đăng ký xong")
 
         # ── BƯỚC 2: CÀI MÃ PIN ───────────────────────────────────
         if progress_callback:
@@ -128,7 +168,7 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
                 }}
                 await sleep(500);
                 let confirm = Array.from(document.querySelectorAll('div, button')).find(
-                    el => el.innerText.trim() === 'Xác Nhận');
+                    el => el.innerText && el.innerText.trim() === 'Xác Nhận');
                 if (confirm) powerTouch(confirm);
             }}
             setupPass();
