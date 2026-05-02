@@ -14,7 +14,8 @@ WITHDRAW_PASS = os.environ.get("WITHDRAW_PASS", "")
 def generate_random_user():
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
     user  = f"mem{suffix}"
-    phone = "09" + "".join(random.choices(string.digits, k=8))
+    # Site dùng prefix +84, ô nhập chỉ cần phần sau: 9xxxxxxxx (9 chữ số)
+    phone = "9" + "".join(random.choices(string.digits, k=8))
     return user, phone
 
 
@@ -102,7 +103,7 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
             fillField("Tên tài khoản", "{user}");
             fillField("mật khẩu", "{password}");
             fillField("SĐT", "{phone}");
-            fillField("Họ và Tên", "{full_name}");
+            fillField("Họ và Tên", "{full_name.upper()}");
 
             setTimeout(() => {{
                 let cb = document.querySelector('input[type="checkbox"]');
