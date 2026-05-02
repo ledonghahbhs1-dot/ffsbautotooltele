@@ -18,6 +18,19 @@ def generate_random_user():
     return user, phone
 
 
+def generate_password():
+    """
+    Tạo mật khẩu ngẫu nhiên 10 ký tự, đảm bảo có đủ:
+    chữ cái + số + ký hiệu (thỏa mãn yêu cầu 6-16 ký tự, 2+ loại ký tự)
+    """
+    letters  = random.choices(string.ascii_letters, k=5)
+    digits   = random.choices(string.digits, k=3)
+    symbols  = random.choices("@#$!%&*", k=2)
+    all_chars = letters + digits + symbols
+    random.shuffle(all_chars)
+    return "".join(all_chars)
+
+
 def get_driver():
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
@@ -37,10 +50,11 @@ def get_driver():
 
 def run_account_creation(full_name: str, stk: str, bank_name: str, progress_callback=None):
     user, phone = generate_random_user()
+    password = generate_password()
     result = {
         "username": user,
         "phone":    phone,
-        "password": "Pass123@abc",
+        "password": password,
         "steps":    [],
         "success":  False,
         "error":    None,
@@ -86,7 +100,7 @@ def run_account_creation(full_name: str, stk: str, bank_name: str, progress_call
             }}
 
             fillField("Tên tài khoản", "{user}");
-            fillField("mật khẩu", "Pass123@abc");
+            fillField("mật khẩu", "{password}");
             fillField("SĐT", "{phone}");
             fillField("Họ và Tên", "{full_name}");
 
