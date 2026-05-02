@@ -163,43 +163,62 @@ async def ask_bank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from telegram import Bot
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-        def progress(msg):
+        def send(text, markdown=False):
             try:
-                bot.send_message(chat_id=chat_id, text=msg)
+                bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode="Markdown" if markdown else None,
+                )
             except Exception:
                 pass
 
+        def progress(msg):
+            send(msg)
+
         for i in range(1, count + 1):
+            label = f" ({i}/{count})" if count > 1 else ""
+
             if count > 1:
-                bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🤖 *Tài khoản {i}/{count}*",
-                    parse_mode="Markdown",
+                send(f"━━━━━━━━━━━━━━━━\n🤖 *Tài khoản {i}/{count}*", markdown=True)
+
+            def on_creds(user, phone, password):
+                send(
+                    f"🆕 *Thông tin tài khoản{label}*\n\n"
+                    f"👤 Tài khoản: `{user}`\n"
+                    f"📱 SĐT: `+84{phone}`\n"
+                    f"🔑 Mật khẩu: `{password}`\n"
+                    f"👨‍💼 Họ tên: `{full_name.upper()}`\n"
+                    f"🏦 Ngân hàng: {bank_name}\n"
+                    f"💳 STK: `{stk}`\n\n"
+                    f"⏳ Đang chạy tự động...",
+                    markdown=True,
                 )
+
             result = run_account_creation(
                 full_name=full_name,
                 stk=stk,
                 bank_name=bank_name,
                 progress_callback=progress,
+                on_credentials_ready=on_creds,
             )
+
             if result["success"]:
-                msg = (
-                    f"✅ *Thành công{f' ({i}/{count})' if count > 1 else ''}!*\n\n"
-                    f"👤 Tài khoản: `{result['username']}`\n"
-                    f"📱 SĐT: `{result['phone']}`\n"
-                    f"🔑 Mật khẩu: `{result['password']}`\n\n"
-                    + "\n".join(result["steps"])
+                send(
+                    f"✅ *Hoàn tất{label}!*\n\n"
+                    + "\n".join(result["steps"]),
+                    markdown=True,
                 )
             else:
-                msg = (
-                    f"❌ *Thất bại{f' ({i}/{count})' if count > 1 else ''}!*\n\n"
-                    f"Lỗi: {result.get('error', 'Không xác định')}\n\n"
-                    + "\n".join(result["steps"])
+                send(
+                    f"❌ *Thất bại{label}!*\n\n"
+                    f"Lỗi: `{result.get('error', 'Không xác định')}`\n\n"
+                    + "\n".join(result["steps"]),
+                    markdown=True,
                 )
-            bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
         if count > 1:
-            bot.send_message(chat_id=chat_id, text=f"🎉 Hoàn tất tất cả {count} tài khoản!")
+            send(f"🎉 *Hoàn tất tất cả {count} tài khoản!*", markdown=True)
 
     thread = threading.Thread(target=run_batch, daemon=True)
     thread.start()
