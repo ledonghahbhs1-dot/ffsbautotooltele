@@ -1,209 +1,125 @@
 """
-Captcha solver cho fly88h.com — hỗ trợ:
-  1. GeeTest V4       — dùng 2captcha SDK (geetest_v4)
-  2. Click-order      — dùng 2captcha SDK (coordinates) hoặc AI vision
-  3. Slide/drag       — dùng 2captcha SDK (coordinates) hoặc AI vision
-
-Thứ tự ưu tiên: 2captcha (nếu có TWOCAPTCHA_API_KEY) → OpenAI → Gemini
+Captcha solver cho fly88h.com — chỉ dùng 2captcha SDK.
+  1. GeeTest V4    — solver.geetest_v4(captcha_id, url)
+  2. Click captcha — solver.coordinates(file, textinstructions)
 """
 import os, base64, json, re, time, logging, tempfile
 from io import BytesIO
 from PIL import Image
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
+from twocaptcha import TwoCaptcha
 
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-AI_PROVIDER    = os.environ.get("AI_CAPTCHA_PROVIDER", "2captcha")
-TWOCAPTCHA_KEY = os.environ.get("TWOCAPTCHA_API_KEY", "")
+API_KEY  = os.getenv("TWOCAPTCHA_API_KEY")
+BASE_URL = os.getenv("BASE_URL", "https://fly88h.com")
 
-# captcha_id cố định của fly88h.com (GeeTest V4)
-GEETEST_V4_CAPTCHA_ID = os.environ.get("GEETEST_V4_CAPTCHA_ID", "cff289689d0273ca771b5c1ef63dc8db")
-PAGE_URL = os.environ.get("BASE_URL", "https://fly88h.com")
+GEETEST_V4_ID  = os.getenv("GEETEST_V4_CAPTCHA_ID", "cff289689d0273ca771b5c1ef63dc8db")
+REGISTER_URL   = f"{BASE_URL}/home/register"
+
+if not API_KEY:
+    logger.error("Không tìm thấy TWOCAPTCHA_API_KEY ❌")
+    solver = None
+else:
+    solver = TwoCaptcha(API_KEY)
 
 
 # ─────────────────────────────────────────────────────
-#  2captcha SDK helpers
+# 1. GIẢI GEETEST V4
 # ─────────────────────────────────────────────────────
-def _get_solver():
-    from twocaptcha import TwoCaptcha
-    return TwoCaptcha(TWOCAPTCHA_KEY)
-
-
-def solve_geetest_v4(page_url: str = None) -> dict | None:
-    """
-    Giải GeeTest V4 bằng 2captcha SDK.
-    Trả về dict chứa lot_number, pass_token, gen_time, captcha_output.
-    """
-    if not TWOCAPTCHA_KEY:
-        logger.warning("Không có TWOCAPTCHA_API_KEY")
+def giai_geetest_v4(website_url: str = None) -> dict | None:
+    if not solver:
         return None
-
-    url = page_url or f"{PAGE_URL}/home/register"
-    logger.info(f"Gửi GeeTest V4 lên 2captcha — captcha_id={GEETEST_V4_CAPTCHA_ID}")
+    url = website_url or REGISTER_URL
+    logger.info(f"Đang nhờ 2Captcha giải GeeTest V4... captcha_id={GEETEST_V4_ID}")
     try:
-        solver = _get_solver()
         result = solver.geetest_v4(
-            captcha_id=GEETEST_V4_CAPTCHA_ID,
+            captcha_id=GEETEST_V4_ID,
             url=url,
         )
-        logger.info(f"GeeTest V4 giải xong: {result}")
+        logger.info(f"Giải V4 thành công ✅: pass_token={str(result.get('pass_token',''))[:12]}...")
         return result
     except Exception as e:
-        logger.error(f"Lỗi GeeTest V4 (2captcha): {e}")
+        logger.error(f"Lỗi giải GeeTest V4: {e} ❌")
         return None
 
 
-def solve_coordinates_via_2captcha(img_b64: str, instructions: str) -> list:
-    """
-    Giải click captcha qua 2captcha coordinates API.
-    Trả về list tọa độ [[x1,y1], [x2,y2], ...].
-    """
-    if not TWOCAPTCHA_KEY:
+# ─────────────────────────────────────────────────────
+# 2. GIẢI CLICK CAPTCHA (tọa độ ảnh)
+# ─────────────────────────────────────────────────────
+def giai_click_captcha(image_path: str, huong_dan: str) -> list:
+    if not solver:
         return []
-
+    logger.info(f"Đang gửi ảnh lấy tọa độ Click Captcha... 🖼️")
     try:
-        solver = _get_solver()
-        # Lưu ảnh tạm để truyền vào SDK
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp.write(base64.b64decode(img_b64))
-            tmp_path = tmp.name
-
-        logger.info(f"Gửi click captcha lên 2captcha coordinates — hướng dẫn: {instructions[:50]}")
         result = solver.coordinates(
-            file=tmp_path,
-            textinstructions=instructions,
+            file=image_path,
+            textinstructions=huong_dan,
         )
-        logger.info(f"Coordinates giải xong: {result}")
+        logger.info(f"Tọa độ click nhận được: {result}")
 
-        os.unlink(tmp_path)
-
-        # SDK trả về dict với key 'code' là list [{x, y}, ...]
         raw = result.get("code", result) if isinstance(result, dict) else result
         if isinstance(raw, list):
             pairs = [[int(p["x"]), int(p["y"])] for p in raw if "x" in p and "y" in p]
         else:
-            # Chuỗi dạng "x1=123,y1=456|x2=200,y2=300"
             pairs = []
             for part in str(raw).split("|"):
                 nums = re.findall(r'\d+', part)
                 if len(nums) >= 2:
                     pairs.append([int(nums[0]), int(nums[1])])
 
-        logger.info(f"Tọa độ click: {pairs}")
+        logger.info(f"✅ Tọa độ đã xử lý: {pairs}")
         return pairs
-
     except Exception as e:
-        logger.error(f"Lỗi coordinates (2captcha): {e}")
+        logger.error(f"Lỗi giải Click Captcha: {e} ❌")
         return []
 
 
 # ─────────────────────────────────────────────────────
-#  AI vision prompts (dự phòng khi không có 2captcha)
+# INJECT KẾT QUẢ GEETEST V4 VÀO TRANG
 # ─────────────────────────────────────────────────────
-PROMPT_CLICK = """You are an image analysis assistant. Analyze this UI widget image.
-
-IMAGE LAYOUT (top to bottom):
-- TOP STRIP (top ~15%): a row of small numbered/icon thumbnails labeled "Chọn theo thứ tự này:" — these define the REQUIRED SELECTION ORDER (left = first, right = last).
-- MAIN PHOTO AREA (~15%–70%): a photo background where the SAME symbols/icons appear scattered at larger size.
-- BOTTOM AREA: a confirmation button labeled "OK".
-
-YOUR TASK:
-1. Identify the icons in the TOP STRIP from left to right (that is the required order).
-2. For each icon, locate its CENTER pixel position inside the MAIN PHOTO AREA.
-3. List coordinates in the required order.
-
-Return ONLY this JSON (no explanation, no markdown):
-{"type":"click","coords":[[x1,y1],[x2,y2],[x3,y3],[x4,y4]]}
-
-All coordinates are pixels relative to the TOP-LEFT corner of this image.
-"""
-
-PROMPT_SLIDE = """You are an image analysis assistant. Analyze this UI puzzle widget image.
-
-IMAGE LAYOUT:
-- A background photo with a DARK RECTANGULAR GAP/NOTCH cut into it.
-- A small floating tile/piece that visually matches the gap.
-- A horizontal DRAG BAR at the bottom with a circular handle positioned on the left side.
-
-YOUR TASK: Calculate how many pixels the circular handle must move to the RIGHT so the floating tile perfectly fills the gap in the background photo.
-
-Return ONLY this JSON (no explanation, no markdown):
-{"type":"slide","distance":<integer_pixels>}
-"""
-
-PROMPT_DETECT = """You are a UI analyst. Look at this website screenshot and identify whether a verification widget popup is currently displayed.
-
-Widget types to look for:
-- "click"  → popup with "Chọn theo thứ tự này" text, icon thumbnails at top, photo below
-- "slide"  → popup with a puzzle piece and a horizontal drag bar ("Lướt hình")
-- "geetest"→ GeeTest V4 widget (logo GeeTest, loading spinner, hoặc overlay verify)
-- "none"   → no such popup visible on screen
-
-Return ONLY valid JSON:
-{"type":"click"} or {"type":"slide"} or {"type":"geetest"} or {"type":"none"}
-"""
-
-
-# ─────────────────────────────────────────────────────
-#  AI vision fallback
-# ─────────────────────────────────────────────────────
-def _call_openai(b64: str, prompt: str) -> str:
-    import urllib.request
-    payload = {"model": "gpt-4o", "max_tokens": 200,
-               "messages": [{"role": "user", "content": [
-                   {"type": "text", "text": prompt},
-                   {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-               ]}]}
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=45) as r:
-        return json.loads(r.read())["choices"][0]["message"]["content"].strip()
-
-
-def _call_gemini(b64: str, prompt: str) -> str:
-    import urllib.request
-    payload = {"contents": [{"parts": [
-        {"text": prompt},
-        {"inlineData": {"mimeType": "image/png", "data": b64}},
-    ]}], "generationConfig": {"maxOutputTokens": 200}}
-    req = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={GOOGLE_API_KEY}",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=45) as r:
-        resp = json.loads(r.read())
-    return resp["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-
-def _ai(b64: str, prompt: str) -> dict:
-    if AI_PROVIDER == "gemini" and GOOGLE_API_KEY:
-        raw = _call_gemini(b64, prompt)
-    elif OPENAI_API_KEY:
-        raw = _call_openai(b64, prompt)
-    else:
-        raise RuntimeError("Chưa có OPENAI_API_KEY hoặc GOOGLE_API_KEY")
-    logger.info(f"AI → {raw[:200]}")
-    clean = re.sub(r"```(?:json)?", "", raw).strip().strip("`")
-    m = re.search(r'\{[^{}]*\}', clean, re.DOTALL)
-    if not m:
-        return {"type": "none"}
+def _submit_geetest_v4(driver, result: dict) -> bool:
     try:
-        return json.loads(m.group())
-    except Exception:
-        return {"type": "none"}
+        lot_number     = result.get("lot_number", "")
+        pass_token     = result.get("pass_token", "")
+        gen_time       = result.get("gen_time", "")
+        captcha_output = result.get("captcha_output", "")
+
+        logger.info(f"Inject GeeTest V4: lot={lot_number[:10]}...")
+
+        status = driver.execute_script(f"""
+            try {{
+                var res = {{
+                    captcha_id: "{GEETEST_V4_ID}",
+                    lot_number: "{lot_number}",
+                    pass_token: "{pass_token}",
+                    gen_time: "{gen_time}",
+                    captcha_output: "{captcha_output}"
+                }};
+                if (typeof window._gt4Callback === 'function') {{
+                    window._gt4Callback(res); return 'callback_ok';
+                }}
+                var filled = 0;
+                ['lot_number','pass_token','gen_time','captcha_output'].forEach(function(f) {{
+                    var el = document.querySelector('input[name="' + f + '"]');
+                    if (el) {{ el.value = res[f]; filled++; }}
+                }});
+                if (filled > 0) return 'inputs_filled:' + filled;
+                window.__geetest4_result = res;
+                return 'stored';
+            }} catch(e) {{ return 'error:' + e.message; }}
+        """)
+        logger.info(f"Inject result: {status}")
+        time.sleep(1)
+        return True
+    except Exception as e:
+        logger.error(f"Lỗi inject GeeTest V4: {e}")
+        return False
 
 
 # ─────────────────────────────────────────────────────
-#  Tìm captcha modal qua JS
+# TÌM VÀ CROP MODAL CAPTCHA
 # ─────────────────────────────────────────────────────
 def _get_modal_rect(driver) -> dict | None:
     rect = driver.execute_script(r"""
@@ -217,8 +133,6 @@ def _get_modal_rect(driver) -> dict | None:
             }
             return null;
         }
-
-        // 1. Tìm text "Chọn theo thứ tự"
         let tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
         let node;
         while (node = tw.nextNode()) {
@@ -227,8 +141,6 @@ def _get_modal_rect(driver) -> dict | None:
                 if (r) return {x: r.left, y: r.top, w: r.width, h: r.height};
             }
         }
-
-        // 2. Fallback: class captcha / geetest
         for (let sel of ['[class*="geetest"]','[class*="captcha"]','[class*="verify"]']) {
             for (let el of document.querySelectorAll(sel)) {
                 let r = el.getBoundingClientRect();
@@ -244,106 +156,29 @@ def _get_modal_rect(driver) -> dict | None:
     return None
 
 
-def _is_geetest_v4(driver) -> bool:
-    """Kiểm tra có widget GeeTest V4 không."""
-    return driver.execute_script("""
-        return !!(
-            document.querySelector('[class*="geetest_wind"]') ||
-            document.querySelector('[class*="geetest_box"]') ||
-            document.querySelector('iframe[src*="geetest"]') ||
-            (typeof window.initGeetest4 !== 'undefined')
-        );
-    """)
-
-
-# ─────────────────────────────────────────────────────
-#  Crop modal
-# ─────────────────────────────────────────────────────
-def _crop_modal(driver, rect: dict) -> str:
-    full_png = driver.get_screenshot_as_png()
-    img = Image.open(BytesIO(full_png))
-    vp_w = driver.execute_script("return window.innerWidth;")
-    dpr  = img.width / vp_w if vp_w else 1.0
-    x1 = max(0, int(rect["x"] * dpr))
-    y1 = max(0, int(rect["y"] * dpr))
-    x2 = min(img.width,  int((rect["x"] + rect["w"]) * dpr))
-    y2 = min(img.height, int((rect["y"] + rect["h"]) * dpr))
-    cropped = img.crop((x1, y1, x2, y2))
-    buf = BytesIO()
-    cropped.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
-
-
-# ─────────────────────────────────────────────────────
-#  Submit GeeTest V4 solution lên trang
-# ─────────────────────────────────────────────────────
-def _submit_geetest_v4(driver, solution: dict) -> bool:
-    """
-    Inject kết quả GeeTest V4 vào trang để tự động xác nhận.
-    2captcha trả về: captcha_id, lot_number, pass_token, gen_time, captcha_output
-    """
+def _crop_modal_to_file(driver, rect: dict) -> str | None:
+    """Crop ảnh modal → lưu file tạm → trả về đường dẫn."""
     try:
-        # Lấy các trường từ solution (SDK có thể trả nested)
-        data = solution if isinstance(solution, dict) else {}
-        # SDK trả về dạng {'code': '...', ...} hoặc nested
-        code = data.get("code", "")
-        if isinstance(code, str) and "lot_number" in code:
-            try:
-                data = json.loads(code)
-            except Exception:
-                pass
-
-        lot_number     = data.get("lot_number", data.get("lotNumber", ""))
-        pass_token     = data.get("pass_token", data.get("passToken", ""))
-        gen_time       = data.get("gen_time", data.get("genTime", ""))
-        captcha_output = data.get("captcha_output", data.get("captchaOutput", ""))
-
-        logger.info(f"Submit GeeTest V4: lot={lot_number[:10]}... pass={pass_token[:10]}...")
-
-        # Inject kết quả vào callback của trang
-        injected = driver.execute_script(f"""
-            try {{
-                var result = {{
-                    captcha_id: "{GEETEST_V4_CAPTCHA_ID}",
-                    lot_number: "{lot_number}",
-                    pass_token: "{pass_token}",
-                    gen_time: "{gen_time}",
-                    captcha_output: "{captcha_output}"
-                }};
-
-                // Thử gọi callback nếu trang expose sẵn
-                if (typeof window._gt4Callback === 'function') {{
-                    window._gt4Callback(result);
-                    return 'callback_ok';
-                }}
-
-                // Thử điền hidden inputs nếu có
-                var fields = ['lot_number','pass_token','gen_time','captcha_output'];
-                var filled = 0;
-                fields.forEach(function(f) {{
-                    var el = document.querySelector('input[name="' + f + '"]');
-                    if (el) {{ el.value = result[f]; filled++; }}
-                }});
-                if (filled > 0) return 'inputs_filled:' + filled;
-
-                // Lưu vào window để automation có thể dùng sau
-                window.__geetest4_result = result;
-                return 'stored';
-            }} catch(e) {{
-                return 'error:' + e.message;
-            }}
-        """)
-        logger.info(f"GeeTest V4 inject result: {injected}")
-        time.sleep(1)
-        return True
-
+        full_png = driver.get_screenshot_as_png()
+        img = Image.open(BytesIO(full_png))
+        vp_w = driver.execute_script("return window.innerWidth;")
+        dpr  = img.width / vp_w if vp_w else 1.0
+        x1 = max(0, int(rect["x"] * dpr))
+        y1 = max(0, int(rect["y"] * dpr))
+        x2 = min(img.width,  int((rect["x"] + rect["w"]) * dpr))
+        y2 = min(img.height, int((rect["y"] + rect["h"]) * dpr))
+        cropped = img.crop((x1, y1, x2, y2))
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        cropped.save(tmp.name, format="PNG")
+        tmp.close()
+        return tmp.name
     except Exception as e:
-        logger.error(f"Lỗi submit GeeTest V4: {e}")
-        return False
+        logger.error(f"Lỗi crop modal: {e}")
+        return None
 
 
 # ─────────────────────────────────────────────────────
-#  Click từng icon theo thứ tự
+# THỰC HIỆN CLICK VÀ NHẤN OK
 # ─────────────────────────────────────────────────────
 def _do_click(driver, coords: list, modal_rect: dict) -> bool:
     if not coords:
@@ -371,57 +206,18 @@ def _do_click(driver, coords: list, modal_rect: dict) -> bool:
     return True
 
 
-# ─────────────────────────────────────────────────────
-#  Kéo slider
-# ─────────────────────────────────────────────────────
-def _do_slide(driver, distance: int) -> bool:
-    handle = None
-    for sel in [
-        "[class*='geetest_slider_button']", "[class*='slide_button']",
-        "[class*='slider_btn']",            "[class*='drag_button']",
-        "[class*='slider'] [class*='btn']",
-        "//div[contains(@class,'slide')]//div[contains(@class,'handle')]",
-    ]:
-        try:
-            fn = By.XPATH if sel.startswith("//") else By.CSS_SELECTOR
-            e  = driver.find_element(fn, sel)
-            if e.is_displayed():
-                handle = e
-                break
-        except Exception:
-            continue
-
-    if not handle:
-        logger.warning("Không tìm thấy slider handle")
-        return False
-
-    steps = max(distance // 8, 6)
-    ppx   = distance / steps
-    ac    = ActionChains(driver)
-    ac.click_and_hold(handle)
-    for _ in range(steps):
-        ac.move_by_offset(int(ppx), 0).pause(0.025)
-    ac.release().perform()
-    time.sleep(1.5)
-    return True
-
-
-# ─────────────────────────────────────────────────────
-#  Nhấn OK
-# ─────────────────────────────────────────────────────
 def _press_ok(driver, modal_rect: dict = None):
     for xpath in [
         "//*[normalize-space(text())='OK']",
         "//*[normalize-space(text())='ok']",
         "//*[contains(@class,'geetest_submit')]",
-        "//*[contains(@class,'captcha_submit')]",
         "//*[contains(@class,'submit')]",
     ]:
         try:
             e = driver.find_element(By.XPATH, xpath)
             if e.is_displayed():
                 e.click()
-                logger.info(f"OK clicked via: {xpath}")
+                logger.info(f"OK clicked: {xpath}")
                 time.sleep(1)
                 return
         except Exception:
@@ -430,7 +226,6 @@ def _press_ok(driver, modal_rect: dict = None):
     if modal_rect:
         px = int(modal_rect["x"] + modal_rect["w"] * 0.49)
         py = int(modal_rect["y"] + modal_rect["h"] * 0.74)
-        logger.info(f"OK fallback click tại ({px},{py})")
         driver.execute_script(
             "var e=document.elementFromPoint(arguments[0],arguments[1]);"
             "if(e)e.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:arguments[0],clientY:arguments[1]}));",
@@ -440,88 +235,62 @@ def _press_ok(driver, modal_rect: dict = None):
 
 
 # ─────────────────────────────────────────────────────
-#  Hàm chính
+# HÀM CHÍNH — GỌI TỪ automation.py
 # ─────────────────────────────────────────────────────
 def solve_captcha_on_page(driver) -> bool:
+    if not solver:
+        logger.error("solver=None, bỏ qua captcha ❌")
+        return False
+
     time.sleep(2)
 
-    # ── Nhánh 2captcha (không cần AI detect) ──────────
-    if TWOCAPTCHA_KEY:
-        # Bước 1: Thử GeeTest V4 trực tiếp (fly88h.com luôn dùng loại này)
-        # Không cần JS check vì selector có thể không khớp
-        logger.info("Có TWOCAPTCHA_KEY — thử giải GeeTest V4 trực tiếp...")
-        current_url = driver.current_url
-        solution = solve_geetest_v4(page_url=current_url)
-        if solution:
-            ok = _submit_geetest_v4(driver, solution)
-            if ok:
-                # Sau khi inject kết quả, nhấn nút ĐĂNG KÝ lại để submit form
-                time.sleep(1)
-                driver.execute_script("""
-                    let all = Array.from(document.querySelectorAll('div, button, span'))
-                        .filter(e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ' && e.offsetParent !== null);
-                    if (all.length > 0) {
-                        let btn = all[all.length - 1];
-                        const opt = { bubbles: true, cancelable: true, view: window };
-                        btn.dispatchEvent(new MouseEvent('mousedown', opt));
-                        btn.dispatchEvent(new MouseEvent('mouseup', opt));
-                        btn.click();
-                    }
-                """)
-                logger.info("Đã click ĐĂNG KÝ sau khi inject GeeTest V4")
-                return True
-            logger.warning("GeeTest V4 inject thất bại, thử click/slide captcha...")
+    # Bước 1: Thử GeeTest V4 (fly88h.com dùng loại này khi đăng ký)
+    current_url = driver.current_url
+    logger.info("Thử giải GeeTest V4 qua 2captcha...")
+    result_v4 = giai_geetest_v4(website_url=current_url)
 
-        # Bước 2: Thử tìm modal click/slide và giải bằng coordinates
-        modal = _get_modal_rect(driver)
-        if modal:
-            img_b64 = _crop_modal(driver, modal)
-            logger.info("Modal tìm thấy — thử 2captcha coordinates (click)...")
-            coords = solve_coordinates_via_2captcha(
-                img_b64,
-                "Nhấp vào các biểu tượng theo đúng thứ tự được chỉ định từ trái sang phải"
-            )
-            if coords:
-                logger.info(f"Tọa độ click: {coords}")
-                return _do_click(driver, coords, modal)
+    if result_v4:
+        ok = _submit_geetest_v4(driver, result_v4)
+        if ok:
+            time.sleep(1)
+            # Click lại ĐĂNG KÝ để submit form sau khi có token
+            driver.execute_script("""
+                let all = Array.from(document.querySelectorAll('div, button, span'))
+                    .filter(e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ' && e.offsetParent !== null);
+                if (all.length > 0) {
+                    let btn = all[all.length - 1];
+                    const opt = { bubbles: true, cancelable: true, view: window };
+                    btn.dispatchEvent(new MouseEvent('mousedown', opt));
+                    btn.dispatchEvent(new MouseEvent('mouseup', opt));
+                    btn.click();
+                }
+            """)
+            logger.info("✅ GeeTest V4 xong, đã click ĐĂNG KÝ")
+            return True
 
-            logger.info("Không có tọa độ click — thử slide...")
-            pts = solve_coordinates_via_2captcha(
-                img_b64,
-                "Kéo mảnh ghép vào đúng vị trí trong ảnh nền"
-            )
-            if pts:
-                dist = int(pts[0][0])
-                logger.info(f"Slide distance: {dist}px")
-                return _do_slide(driver, dist)
-
-        logger.warning("2captcha: không tìm thấy captcha nào để giải")
-        return False
-
-    # ── Nhánh AI fallback (chỉ khi không có 2captcha) ─
+    # Bước 2: Tìm modal click captcha (nếu GeeTest V4 không có)
+    logger.info("GeeTest V4 thất bại, tìm modal click captcha...")
     modal = _get_modal_rect(driver)
-    if modal:
-        img_b64 = _crop_modal(driver, modal)
-    else:
-        logger.warning("Không tìm thấy modal → dùng full page")
-        img_b64 = base64.b64encode(driver.get_screenshot_as_png()).decode()
-        modal   = {"x": 0, "y": 0, "w": 1280, "h": 800}
-
-    det   = _ai(img_b64, PROMPT_DETECT)
-    ctype = det.get("type", "none")
-    logger.info(f"AI detect captcha: {ctype}")
-
-    if ctype == "none":
+    if not modal:
+        logger.warning("Không tìm thấy captcha nào ❌")
         return False
 
-    if ctype == "click":
-        res    = _ai(img_b64, PROMPT_CLICK)
-        coords = res.get("coords", [])
-        return _do_click(driver, coords, modal)
+    img_path = _crop_modal_to_file(driver, modal)
+    if not img_path:
+        return False
 
-    if ctype == "slide":
-        res  = _ai(img_b64, PROMPT_SLIDE)
-        dist = int(res.get("distance", 120))
-        return _do_slide(driver, dist)
+    try:
+        coords = giai_click_captcha(
+            image_path=img_path,
+            huong_dan="Nhấp vào các biểu tượng theo đúng thứ tự được chỉ định từ trái sang phải",
+        )
+        if coords:
+            return _do_click(driver, coords, modal)
 
-    return False
+        logger.warning("Không lấy được tọa độ click ❌")
+        return False
+    finally:
+        try:
+            os.unlink(img_path)
+        except Exception:
+            pass
