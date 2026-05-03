@@ -152,18 +152,56 @@ def run_account_creation(
         """)
         time.sleep(3)   # Chờ captcha xuất hiện
 
-        # 3. Giải captcha (sau khi đã hiện)
+        # 3. Giải captcha — retry tối đa 3 lần
+        MAX_CAPTCHA_RETRY = 3
+        solved = False
+
         if captcha_enabled:
-            if progress_callback:
-                progress_callback("🧩 AI đang giải captcha...")
-            try:
-                solved = solve_captcha_on_page(driver)
-                status = "✅ Captcha: AI giải thành công" if solved else "⚠️ Không tìm thấy captcha, thử tiếp"
-                result["steps"].append(status)
+            for attempt in range(1, MAX_CAPTCHA_RETRY + 1):
                 if progress_callback:
-                    progress_callback(status)
-            except Exception as e:
-                result["steps"].append(f"⚠️ Captcha lỗi: {e}")
+                    progress_callback(f"🧩 Đang giải captcha... (lần {attempt}/{MAX_CAPTCHA_RETRY})")
+                try:
+                    solved = solve_captcha_on_page(driver)
+                except Exception as e:
+                    logger.warning(f"Captcha lần {attempt} lỗi: {e}")
+                    solved = False
+
+                if solved:
+                    status = f"✅ Captcha: giải thành công (lần {attempt})"
+                    result["steps"].append(status)
+                    if progress_callback:
+                        progress_callback(status)
+                    break
+
+                # Kiểm tra đã thoát trang đăng ký chưa (captcha có thể đã qua)
+                if "register" not in driver.current_url:
+                    solved = True
+                    result["steps"].append("✅ Captcha: đã qua (redirect)")
+                    break
+
+                if attempt < MAX_CAPTCHA_RETRY:
+                    if progress_callback:
+                        progress_callback(f"⚠️ Lần {attempt} chưa được, thử lại sau 3 giây...")
+                    time.sleep(3)
+                    # Nhấn ĐĂNG KÝ lại để hiện captcha mới
+                    driver.execute_script("""
+                        let cb = document.querySelector('input[type="checkbox"]');
+                        if (cb && !cb.checked) cb.click();
+                        let all = Array.from(document.querySelectorAll('div, button, span'))
+                            .filter(e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ' && e.offsetParent !== null);
+                        if (all.length > 0) {
+                            let btn = all[all.length - 1];
+                            const opt = { bubbles: true, cancelable: true, view: window };
+                            btn.dispatchEvent(new MouseEvent('mousedown', opt));
+                            btn.dispatchEvent(new MouseEvent('mouseup', opt));
+                            btn.click();
+                        }
+                    """)
+                    time.sleep(3)
+                else:
+                    result["steps"].append(f"⚠️ Captcha: thất bại sau {MAX_CAPTCHA_RETRY} lần thử")
+                    if progress_callback:
+                        progress_callback(f"❌ Captcha thất bại sau {MAX_CAPTCHA_RETRY} lần")
         else:
             if progress_callback:
                 progress_callback("🧩 Chờ captcha hiện & giải tay (20 giây)...")
