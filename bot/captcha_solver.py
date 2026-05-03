@@ -445,66 +445,83 @@ def _press_ok(driver, modal_rect: dict = None):
 def solve_captcha_on_page(driver) -> bool:
     time.sleep(2)
 
-    # Bước 1: Kiểm tra GeeTest V4 trước (ưu tiên cao nhất)
-    if TWOCAPTCHA_KEY and _is_geetest_v4(driver):
-        logger.info("Phát hiện GeeTest V4 — giải qua 2captcha SDK...")
+    # ── Nhánh 2captcha (không cần AI detect) ──────────
+    if TWOCAPTCHA_KEY:
+        # Bước 1: Thử GeeTest V4 trực tiếp (fly88h.com luôn dùng loại này)
+        # Không cần JS check vì selector có thể không khớp
+        logger.info("Có TWOCAPTCHA_KEY — thử giải GeeTest V4 trực tiếp...")
         current_url = driver.current_url
         solution = solve_geetest_v4(page_url=current_url)
         if solution:
-            return _submit_geetest_v4(driver, solution)
-        logger.warning("GeeTest V4 giải thất bại, thử phương án khác...")
+            ok = _submit_geetest_v4(driver, solution)
+            if ok:
+                # Sau khi inject kết quả, nhấn nút ĐĂNG KÝ lại để submit form
+                time.sleep(1)
+                driver.execute_script("""
+                    let all = Array.from(document.querySelectorAll('div, button, span'))
+                        .filter(e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ' && e.offsetParent !== null);
+                    if (all.length > 0) {
+                        let btn = all[all.length - 1];
+                        const opt = { bubbles: true, cancelable: true, view: window };
+                        btn.dispatchEvent(new MouseEvent('mousedown', opt));
+                        btn.dispatchEvent(new MouseEvent('mouseup', opt));
+                        btn.click();
+                    }
+                """)
+                logger.info("Đã click ĐĂNG KÝ sau khi inject GeeTest V4")
+                return True
+            logger.warning("GeeTest V4 inject thất bại, thử click/slide captcha...")
 
-    # Bước 2: Tìm modal captcha click/slide
+        # Bước 2: Thử tìm modal click/slide và giải bằng coordinates
+        modal = _get_modal_rect(driver)
+        if modal:
+            img_b64 = _crop_modal(driver, modal)
+            logger.info("Modal tìm thấy — thử 2captcha coordinates (click)...")
+            coords = solve_coordinates_via_2captcha(
+                img_b64,
+                "Nhấp vào các biểu tượng theo đúng thứ tự được chỉ định từ trái sang phải"
+            )
+            if coords:
+                logger.info(f"Tọa độ click: {coords}")
+                return _do_click(driver, coords, modal)
+
+            logger.info("Không có tọa độ click — thử slide...")
+            pts = solve_coordinates_via_2captcha(
+                img_b64,
+                "Kéo mảnh ghép vào đúng vị trí trong ảnh nền"
+            )
+            if pts:
+                dist = int(pts[0][0])
+                logger.info(f"Slide distance: {dist}px")
+                return _do_slide(driver, dist)
+
+        logger.warning("2captcha: không tìm thấy captcha nào để giải")
+        return False
+
+    # ── Nhánh AI fallback (chỉ khi không có 2captcha) ─
     modal = _get_modal_rect(driver)
-
     if modal:
         img_b64 = _crop_modal(driver, modal)
-        logger.info("Đã crop ảnh modal captcha")
     else:
         logger.warning("Không tìm thấy modal → dùng full page")
         img_b64 = base64.b64encode(driver.get_screenshot_as_png()).decode()
         modal   = {"x": 0, "y": 0, "w": 1280, "h": 800}
 
-    # Bước 3: Phát hiện loại captcha
     det   = _ai(img_b64, PROMPT_DETECT)
     ctype = det.get("type", "none")
-    logger.info(f"Loại captcha phát hiện: {ctype}")
+    logger.info(f"AI detect captcha: {ctype}")
 
     if ctype == "none":
         return False
 
-    if ctype == "geetest" and TWOCAPTCHA_KEY:
-        current_url = driver.current_url
-        solution = solve_geetest_v4(page_url=current_url)
-        if solution:
-            return _submit_geetest_v4(driver, solution)
-        return False
-
     if ctype == "click":
-        if TWOCAPTCHA_KEY:
-            logger.info("Dùng 2captcha coordinates để giải click-order...")
-            coords = solve_coordinates_via_2captcha(
-                img_b64,
-                "Nhấp vào các biểu tượng theo đúng thứ tự được chỉ định từ trái sang phải"
-            )
-        else:
-            res    = _ai(img_b64, PROMPT_CLICK)
-            coords = res.get("coords", [])
-        logger.info(f"Tọa độ click: {coords}")
+        res    = _ai(img_b64, PROMPT_CLICK)
+        coords = res.get("coords", [])
         return _do_click(driver, coords, modal)
 
     if ctype == "slide":
-        if TWOCAPTCHA_KEY:
-            logger.info("Dùng 2captcha coordinates để giải slide...")
-            pts = solve_coordinates_via_2captcha(
-                img_b64,
-                "Kéo mảnh ghép vào đúng vị trí trong ảnh nền"
-            )
-            dist = int(pts[0][0]) if pts else 120
-        else:
-            res  = _ai(img_b64, PROMPT_SLIDE)
-            dist = int(res.get("distance", 120))
-        logger.info(f"Slide distance: {dist}px")
+        res  = _ai(img_b64, PROMPT_SLIDE)
+        dist = int(res.get("distance", 120))
         return _do_slide(driver, dist)
 
     return False
