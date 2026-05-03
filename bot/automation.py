@@ -99,6 +99,7 @@ def run_account_creation(
         driver.get(f"{BASE_URL}/home/register")
         time.sleep(3)
 
+        # 1. Điền tất cả trường
         driver.execute_script(f"""
             function fillField(p, v) {{
                 let input = document.querySelector(`input[placeholder*="${{p}}"]`);
@@ -108,31 +109,36 @@ def run_account_creation(
                     input.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 }}
             }}
-            function realClick(el) {{
-                if (!el) return;
-                const opt = {{ bubbles: true, cancelable: true, view: window }};
-                el.dispatchEvent(new MouseEvent('mousedown', opt));
-                el.dispatchEvent(new MouseEvent('mouseup', opt));
-                el.click();
-            }}
             fillField("Tên tài khoản", "{user}");
             fillField("mật khẩu", "{password}");
             fillField("SĐT", "{phone}");
             fillField("Họ và Tên", "{full_name.upper()}");
-            setTimeout(() => {{
-                let cb = document.querySelector('input[type="checkbox"]');
-                if (cb && !cb.checked) realClick(cb);
-            }}, 400);
+            let cb = document.querySelector('input[type="checkbox"]');
+            if (cb && !cb.checked) cb.click();
         """)
         time.sleep(2)
 
-        # ── XỬ LÝ CAPTCHA ─────────────────────────────────────────
+        # 2. Nhấn ĐĂNG KÝ lần đầu → kích hoạt hiện captcha
+        if progress_callback:
+            progress_callback("🖱️ Nhấn ĐĂNG KÝ để hiện captcha...")
+        driver.execute_script("""
+            let btn = Array.from(document.querySelectorAll('div, button')).find(
+                e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ');
+            if (btn) {
+                btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                btn.dispatchEvent(new MouseEvent('mouseup',   {bubbles: true}));
+                btn.click();
+            }
+        """)
+        time.sleep(3)   # Chờ captcha xuất hiện
+
+        # 3. Giải captcha (sau khi đã hiện)
         if captcha_enabled:
             if progress_callback:
                 progress_callback("🧩 AI đang giải captcha...")
             try:
                 solved = solve_captcha_on_page(driver)
-                status = "✅ Captcha: AI giải thành công" if solved else "⚠️ Không tìm thấy captcha"
+                status = "✅ Captcha: AI giải thành công" if solved else "⚠️ Không tìm thấy captcha, thử tiếp"
                 result["steps"].append(status)
                 if progress_callback:
                     progress_callback(status)
@@ -140,22 +146,11 @@ def run_account_creation(
                 result["steps"].append(f"⚠️ Captcha lỗi: {e}")
         else:
             if progress_callback:
-                progress_callback("🧩 Chờ captcha (15 giây)...")
-            time.sleep(15)
-            result["steps"].append("⏳ Captcha: chờ 15 giây")
+                progress_callback("🧩 Chờ captcha hiện & giải tay (20 giây)...")
+            time.sleep(20)
+            result["steps"].append("⏳ Captcha: chờ 20 giây")
 
-        # Nhấn ĐĂNG KÝ
-        driver.execute_script("""
-            let btn = Array.from(document.querySelectorAll('div, button')).find(
-                e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ');
-            if (btn) {
-                const opt = { bubbles: true, cancelable: true, view: window };
-                btn.dispatchEvent(new MouseEvent('mousedown', opt));
-                btn.dispatchEvent(new MouseEvent('mouseup', opt));
-                btn.click();
-            }
-        """)
-        time.sleep(4)
+        time.sleep(2)   # Chờ captcha được xử lý xong
 
         # ── XÁC NHẬN ĐĂNG KÝ THÀNH CÔNG ──────────────────────────
         current_url = driver.current_url
