@@ -119,16 +119,23 @@ def run_account_creation(
         time.sleep(2)
 
         # 2. Nhấn ĐĂNG KÝ lần đầu → kích hoạt hiện captcha
+        # Dùng phần tử CUỐI cùng vì trang có 2 "ĐĂNG KÝ": tab trên cùng + nút submit dưới form
         if progress_callback:
-            progress_callback("🖱️ Nhấn ĐĂNG KÝ để hiện captcha...")
+            progress_callback("🖱️ Nhấn ĐĂNG KÝ (nút xác nhận) để hiện captcha...")
         driver.execute_script("""
-            let btn = Array.from(document.querySelectorAll('div, button')).find(
-                e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ');
-            if (btn) {
-                btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-                btn.dispatchEvent(new MouseEvent('mouseup',   {bubbles: true}));
-                btn.click();
-            }
+            let cb = document.querySelector('input[type="checkbox"]');
+            if (cb && !cb.checked) cb.click();
+            setTimeout(() => {
+                let all = Array.from(document.querySelectorAll('div, button, span'))
+                    .filter(e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ' && e.offsetParent !== null);
+                if (all.length > 0) {
+                    let btn = all[all.length - 1];   // Nút CUỐI = nút xác nhận dưới form
+                    const opt = { bubbles: true, cancelable: true, view: window };
+                    btn.dispatchEvent(new MouseEvent('mousedown', opt));
+                    btn.dispatchEvent(new MouseEvent('mouseup',   opt));
+                    btn.click();
+                }
+            }, 800);
         """)
         time.sleep(3)   # Chờ captcha xuất hiện
 
