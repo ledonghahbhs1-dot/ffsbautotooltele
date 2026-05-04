@@ -461,8 +461,17 @@ def _extract_captcha_params(driver) -> dict:
         // ── Amazon WAF ────────────────────────────────────────
         var awsM = html.match(/aws.?waf.?token['"]\s*:\s*['"]([^'"]+)['"]/i);
         result.amazon_waf_token = awsM ? awsM[1] : '';
-        var awsSK = html.match(/awswaf.*?siteKey['"]\s*:\s*['"]([^'"]+)['"]/i);
+        var awsSK = html.match(/awswaf.*?siteKey['"]\s*:\s*['"]([^'"]+)['"]/i)
+                 || html.match(/['"key['"]\s*:\s*['"]([A-Za-z0-9\-]{20,})['"]/);
         result.amazon_waf_sitekey = awsSK ? awsSK[1] : '';
+        // iv: AWS WAF challenge embeds iv as JS variable
+        var awsIV = html.match(/['"iv['"]\s*:\s*['"]([^'"]{10,})['"]/i)
+                 || html.match(/iv\s*=\s*['"]([^'"]{10,})['"]/i);
+        result.amazon_waf_iv = awsIV ? awsIV[1] : '';
+        // context: challenge context string
+        var awsCtx = html.match(/['"context['"]\s*:\s*['"]([^'"]{10,})['"]/i)
+                  || html.match(/context\s*=\s*['"]([^'"]{10,})['"]/i);
+        result.amazon_waf_context = awsCtx ? awsCtx[1] : '';
 
         // ── CaptchaFox sitekey ────────────────────────────────
         var cfxM = html.match(/captchafox.*?sitekey['"]\s*[=:]\s*['"]([^'"]+)['"]/i);
@@ -644,9 +653,11 @@ def _solve_funcaptcha_token(website_url: str, public_key: str,
         return None
     logger.info(f"[captcha] FunCaptcha — key={public_key[:12]}...")
     try:
-        kwargs = dict(public_key=public_key, url=website_url)
+        # SDK: funcaptcha(self, sitekey, url, **kwargs) — positional param tên là sitekey
+        # optional: surl (không phải serviceUrl)
+        kwargs = dict(sitekey=public_key, url=website_url)
         if service_url:
-            kwargs["serviceUrl"] = service_url
+            kwargs["surl"] = service_url   # SDK dùng surl, không phải serviceUrl
         result = solver.funcaptcha(**kwargs)
         token = result.get("code", result) if isinstance(result, dict) else result
         logger.info(f"[captcha] FunCaptcha token OK")
@@ -689,16 +700,21 @@ def _solve_capy_token(website_url: str, sitekey: str) -> dict | None:
 
 def _solve_amazon_waf_token(website_url: str, sitekey: str,
                              iv: str = "", context: str = "") -> str | None:
+    """
+    SDK signature: amazon_waf(self, sitekey, iv, context, url, **kwargs)
+    iv và context là positional required — luôn phải truyền, dù là chuỗi rỗng.
+    """
     if not solver or not sitekey:
         return None
-    logger.info(f"[captcha] Amazon WAF — key={sitekey[:12]}...")
+    logger.info(f"[captcha] Amazon WAF — key={sitekey[:12]}... iv={iv[:8] if iv else '(none)'}")
     try:
-        kwargs = dict(sitekey=sitekey, url=website_url)
-        if iv:
-            kwargs["iv"] = iv
-        if context:
-            kwargs["context"] = context
-        result = solver.amazon_waf(**kwargs)
+        # Luôn truyền đủ 4 positional args: sitekey, iv, context, url
+        result = solver.amazon_waf(
+            sitekey=sitekey,
+            iv=iv or "",          # bắt buộc theo SDK signature, truyền "" nếu không có
+            context=context or "", # bắt buộc theo SDK signature
+            url=website_url,
+        )
         token = result.get("code", result) if isinstance(result, dict) else result
         logger.info(f"[captcha] Amazon WAF token OK")
         return str(token)
@@ -795,16 +811,42 @@ def _solve_friendly_captcha_token(website_url: str, sitekey: str,
 
 
 def _solve_datadome_token(website_url: str, captcha_url: str,
-                           proxy: str = "") -> str | None:
+                           user_agent: str = "", proxy: str = "") -> str | None:
+    """
+    SDK signature: datadome(self, captcha_url, pageurl, userAgent, proxy, **kwargs)
+    Tất cả 4 tham số là bắt buộc (positional) theo SDK Python.
+    - captcha_url: src của iframe datadome trên trang
+    - pageurl: URL trang gốc (KHÔNG phải url=)
+    - userAgent: UA của browser đang dùng (bắt buộc)
+    - proxy: dict hoặc string proxy (bắt buộc cho DataDome vì cần IP thật)
+    """
     if not solver or not captcha_url:
         return None
+    if not user_agent:
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+    if not proxy:
+        logger.warning("[captcha] DataDome: không có proxy — 2captcha yêu cầu proxy thật. "
+                       "Giải có thể thất bại.")
+        proxy_dict = {"type": "http", "uri": "127.0.0.1:8080"}  # placeholder tránh lỗi SDK
+    elif isinstance(proxy, dict):
+        proxy_dict = proxy
+    else:
+        proxy_dict = {"type": "http", "uri": proxy}
     logger.info(f"[captcha] DataDome — captcha_url={captcha_url[:40]}...")
     try:
-        kwargs = dict(captcha_url=captcha_url, url=website_url)
-        if proxy:
-            kwargs["proxy"] = {"type": "http", "uri": proxy}
-        result = solver.datadome(**kwargs)
+        # Gọi đúng theo SDK: datadome(captcha_url, pageurl, userAgent, proxy)
+        result = solver.datadome(
+            captcha_url=captcha_url,
+            pageurl=website_url,     # SDK dùng pageurl KHÔNG phải url
+            userAgent=user_agent,    # bắt buộc
+            proxy=proxy_dict,        # bắt buộc
+        )
         token = result.get("code", result) if isinstance(result, dict) else result
+        logger.info(f"[captcha] DataDome token OK")
         return str(token)
     except Exception as e:
         logger.error(f"[captcha] DataDome lỗi: {e}")
@@ -1678,7 +1720,10 @@ def solve_captcha_on_page(driver, form_data: dict = None,
             if sitekey:
                 if progress_cb:
                     progress_cb("🔑 Giải Amazon WAF CAPTCHA...")
-                token = _solve_amazon_waf_token(current_url, sitekey)
+                # Truyền iv và context — bắt buộc trong SDK signature
+                iv      = params.get("amazon_waf_iv",      "")
+                context = params.get("amazon_waf_context",  "")
+                token = _solve_amazon_waf_token(current_url, sitekey, iv=iv, context=context)
                 if token:
                     _inject_generic_token(driver, token, ["aws-waf-token"])
                     solved_count += 1
@@ -1696,7 +1741,12 @@ def solve_captcha_on_page(driver, form_data: dict = None,
             if captcha_url:
                 if progress_cb:
                     progress_cb("🔑 Giải DataDome CAPTCHA...")
-                token = _solve_datadome_token(current_url, captcha_url)
+                # Lấy UA thực từ browser đang chạy — DataDome yêu cầu khớp với UA thật
+                try:
+                    ua = driver.execute_script("return navigator.userAgent;") or ""
+                except Exception:
+                    ua = ""
+                token = _solve_datadome_token(current_url, captcha_url, user_agent=ua)
                 if token:
                     _inject_generic_token(driver, token, ["dd_token","datadome"])
                     solved_count += 1
