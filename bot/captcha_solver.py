@@ -443,7 +443,8 @@ def submit_register_curl_cffi(driver, token_result: dict, form_data: dict,
         "Origin":       BASE_URL,
     }
 
-    logger.info(f"[curl_cffi] POST → {REGISTER_API_URL} | user={payload['username']}")
+    api_url = form_data.get("api_url") or REGISTER_API_URL
+    logger.info(f"[curl_cffi] POST → {api_url} | user={payload['username']}")
     try:
         session = curl_req.Session()
         for name, value in selenium_cookies.items():
