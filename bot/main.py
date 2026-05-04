@@ -30,6 +30,11 @@ ALLOWED_USERS = (
 # Conversation states
 ASK_COUNT, ASK_FULL_NAME, ASK_STK, ASK_BANK = range(4)
 
+# Menu callback data
+MENU_ONE  = "menu:one"
+MENU_MANY = "menu:many"
+MENU_HELP = "menu:help"
+
 BANKS = [
     "Vietcombank", "Vietinbank", "BIDV", "Agribank",
     "MB Bank", "Techcombank", "VPBank", "ACB",
@@ -57,31 +62,80 @@ def bank_keyboard():
     return InlineKeyboardMarkup(buttons)
 
 
+def main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🆕 Tạo 1 tài khoản",    callback_data=MENU_ONE),
+            InlineKeyboardButton("🔢 Tạo nhiều tài khoản", callback_data=MENU_MANY),
+        ],
+        [
+            InlineKeyboardButton("📖 Hướng dẫn", callback_data=MENU_HELP),
+        ],
+    ])
+
+
 # ── /start ─────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "👋 *Xin chào! Bot tự động tạo tài khoản fly88h.com*\n\n"
+        "Chọn thao tác bên dưới:"
+    )
     await update.message.reply_text(
-        "👋 Xin chào! Bot tự động tạo tài khoản.\n\n"
-        "📋 *Lệnh có sẵn:*\n"
-        "• /taotaikhoan — Tạo 1 tài khoản mới\n"
-        "• /taonhieu — Tạo nhiều tài khoản\n"
-        "• /huy — Huỷ thao tác hiện tại\n"
-        "• /help — Hướng dẫn",
+        text,
         parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
     )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Hướng dẫn sử dụng*\n\n"
-        "1️⃣ /taotaikhoan — Tạo 1 tài khoản\n"
-        "2️⃣ /taonhieu — Tạo nhiều tài khoản liên tiếp\n\n"
+        "1️⃣ Nhấn *Tạo 1 tài khoản* hoặc dùng /taotaikhoan\n"
+        "2️⃣ Nhấn *Tạo nhiều tài khoản* hoặc dùng /taonhieu\n\n"
         "Bot sẽ hỏi:\n"
         "• Họ và tên đầy đủ\n"
         "• Số tài khoản ngân hàng\n"
         "• Chọn ngân hàng từ danh sách\n\n"
-        "⚠️ Mỗi tài khoản mất khoảng 30–45 giây.",
+        "⚠️ Mỗi tài khoản mất khoảng 30–45 giây.\n\n"
+        "🚫 Dùng /huy để huỷ thao tác hiện tại.",
         parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
     )
+
+
+# ── Menu inline button handler ──────────────────────────────────────
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action = query.data
+
+    if action == MENU_HELP:
+        await query.message.reply_text(
+            "📖 *Hướng dẫn sử dụng*\n\n"
+            "1️⃣ Nhấn *Tạo 1 tài khoản* để tạo 1 tài khoản mới\n"
+            "2️⃣ Nhấn *Tạo nhiều tài khoản* để tạo hàng loạt (tối đa 10)\n\n"
+            "Bot sẽ hỏi:\n"
+            "• Họ và tên đầy đủ\n"
+            "• Số tài khoản ngân hàng\n"
+            "• Chọn ngân hàng từ danh sách\n\n"
+            "⚠️ Mỗi tài khoản mất khoảng 30–45 giây.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+        return ConversationHandler.END
+
+    if not is_allowed(update):
+        await query.message.reply_text("⛔ Bạn không có quyền dùng bot này.")
+        return ConversationHandler.END
+
+    if action == MENU_MANY:
+        await query.message.reply_text("🔢 Muốn tạo bao nhiêu tài khoản? (nhập số từ 1–10)")
+        return ASK_COUNT
+
+    # MENU_ONE
+    context.user_data["count"] = 1
+    await query.message.reply_text("✍️ Nhập *Họ và Tên đầy đủ*:", parse_mode="Markdown")
+    return ASK_FULL_NAME
 
 
 # ── Bắt đầu luồng tạo tài khoản ───────────────────────────────────
@@ -261,12 +315,15 @@ def main():
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN chưa được cấu hình!")
 
+    replit_domain = os.environ.get("REPLIT_DEV_DOMAIN", "")
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("taotaikhoan", tao_tai_khoan),
             CommandHandler("taonhieu", tao_nhieu),
+            CallbackQueryHandler(handle_menu, pattern="^menu:"),
         ],
         states={
             ASK_COUNT:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_count)],
@@ -274,15 +331,31 @@ def main():
             ASK_STK:       [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_stk)],
             ASK_BANK:      [CallbackQueryHandler(ask_bank, pattern="^bank:")],
         },
-        fallbacks=[CommandHandler("huy", cancel)],
+        fallbacks=[
+            CommandHandler("huy", cancel),
+            CommandHandler("start", cancel),
+        ],
+        per_message=False,
     )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(conv)
 
-    logger.info("Bot đang chạy...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    if replit_domain:
+        webhook_url = f"https://{replit_domain}/webhook"
+        logger.info(f"Bot đang chạy ở chế độ webhook: {webhook_url}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=8000,
+            url_path="/webhook",
+            webhook_url=webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+    else:
+        logger.info("Bot đang chạy ở chế độ polling...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
