@@ -451,7 +451,7 @@ def submit_register_curl_cffi(driver, token_result: dict, form_data: dict,
             session.cookies.set(name, value)
 
         resp = session.post(
-            REGISTER_API_URL,
+            api_url,
             json=payload,
             headers=headers,
             impersonate="chrome120",
