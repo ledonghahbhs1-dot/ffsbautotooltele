@@ -6,6 +6,6 @@ requires-python = ">=3.12"
 dependencies = [
     "2captcha-python==2.0.6",
     "pillow==10.3.0",
-    "python-telegram-bot==20.7",
+    "python-telegram-bot[webhooks]==20.7",
     "selenium==4.18.1",
 ]
