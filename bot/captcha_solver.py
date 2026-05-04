@@ -44,16 +44,33 @@ def giai_click_captcha(image_path: str, huong_dan: str) -> list:
         logger.info(f"✅ Tọa độ nhận được: {result}")
 
         raw = result.get("code", result) if isinstance(result, dict) else result
-        if isinstance(raw, list):
-            pairs = [[int(p["x"]), int(p["y"])] for p in raw if "x" in p and "y" in p]
-        else:
-            pairs = []
-            for part in str(raw).split("|"):
-                nums = re.findall(r'\d+', part)
-                if len(nums) >= 2:
-                    pairs.append([int(nums[0]), int(nums[1])])
 
-        logger.info(f"Tọa độ đã xử lý: {pairs}")
+        pairs = []
+        if isinstance(raw, list):
+            # Dạng list của dict: [{"x":112,"y":109}, ...]
+            for p in raw:
+                if isinstance(p, dict) and "x" in p and "y" in p:
+                    pairs.append([int(p["x"]), int(p["y"])])
+        else:
+            # Dạng string: "coordinates:x=112,y=109;x=40,y=88;..."
+            raw_str = str(raw)
+            raw_str = re.sub(r'^coordinates:', '', raw_str, flags=re.IGNORECASE).strip()
+            # Tách từng điểm bằng ";" (định dạng 2captcha trả về)
+            for part in raw_str.split(";"):
+                part = part.strip()
+                if not part:
+                    continue
+                x_m = re.search(r'x=(\d+)', part, re.IGNORECASE)
+                y_m = re.search(r'y=(\d+)', part, re.IGNORECASE)
+                if x_m and y_m:
+                    pairs.append([int(x_m.group(1)), int(y_m.group(1))])
+                else:
+                    # Fallback: lấy 2 số đầu tiên trong phần
+                    nums = re.findall(r'\d+', part)
+                    if len(nums) >= 2:
+                        pairs.append([int(nums[0]), int(nums[1])])
+
+        logger.info(f"Tọa độ đã xử lý ({len(pairs)} điểm): {pairs}")
         return pairs
     except Exception as e:
         logger.error(f"Lỗi giải Click Captcha: {e} ❌")
