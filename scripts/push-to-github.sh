@@ -23,5 +23,10 @@ AUTH_URL=$(echo "$CLEAN_URL" | sed "s|https://|https://x-access-token:${GITHUB_P
 
 BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
 
+if [ "$BRANCH" != "main" ]; then
+    echo "ℹ️  On branch '$BRANCH' (not main) — skipping auto-push."
+    exit 0
+fi
+
 echo "🔄 Auto-pushing branch '$BRANCH' to GitHub..."
 git push "$AUTH_URL" "HEAD:refs/heads/$BRANCH" --quiet && echo "✅ Pushed to GitHub successfully." || echo "❌ Push to GitHub failed."

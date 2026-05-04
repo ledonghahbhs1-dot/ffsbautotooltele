@@ -1,0 +1,7 @@
+#!/bin/bash
+# Post-commit hook: auto-push to GitHub
+# This script is run automatically after every git commit.
+# Install via: scripts/install-hooks.sh
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+"$REPO_ROOT/scripts/push-to-github.sh"
