@@ -17,6 +17,17 @@ if [ -z "$REMOTE_URL" ]; then
     exit 0
 fi
 
+# Convert SSH remote (git@github.com:owner/repo.git) to HTTPS so the PAT can be used
+if echo "$REMOTE_URL" | grep -q "^git@"; then
+    REMOTE_URL=$(echo "$REMOTE_URL" | sed 's|git@github.com:|https://github.com/|')
+fi
+
+# Reject non-HTTPS remotes we cannot handle
+if ! echo "$REMOTE_URL" | grep -q "^https://"; then
+    echo "❌ Unsupported remote URL scheme: $REMOTE_URL — cannot inject PAT. Push skipped."
+    exit 1
+fi
+
 # Strip any existing credentials from the URL and inject the token
 CLEAN_URL=$(echo "$REMOTE_URL" | sed 's|https://[^@]*@|https://|')
 AUTH_URL=$(echo "$CLEAN_URL" | sed "s|https://|https://x-access-token:${GITHUB_PERSONAL_ACCESS_TOKEN}@|")
