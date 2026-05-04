@@ -130,6 +130,14 @@ def run_account_creation(
             logger.warning(f"Captcha solver không khả dụng: {e}")
             captcha_enabled = False
 
+        # form_data dùng cho curl_cffi submit sau khi giải GeeTest v4
+        form_data = {
+            "user":      user,
+            "phone":     phone,
+            "password":  password,
+            "full_name": full_name,
+        }
+
         # ── BƯỚC 1: ĐĂNG KÝ ──────────────────────────────────────
         if progress_callback:
             progress_callback(f"📝 Bước 1: Điền form đăng ký [{user}]...")
@@ -186,7 +194,11 @@ def run_account_creation(
                 if progress_callback:
                     progress_callback(f"🧩 Đang giải captcha... (lần {attempt}/{MAX_CAPTCHA_RETRY})")
                 try:
-                    solved = solve_captcha_on_page(driver)
+                    solved = solve_captcha_on_page(
+                        driver,
+                        form_data=form_data,
+                        progress_cb=progress_callback,
+                    )
                 except Exception as e:
                     logger.warning(f"Captcha lần {attempt} lỗi: {e}")
                     solved = False
