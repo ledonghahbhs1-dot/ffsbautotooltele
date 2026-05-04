@@ -29,6 +29,51 @@ def generate_password():
     return "".join(all_chars)
 
 
+_sniffed_api_url: str = ""   # Cache toàn cục để tái sử dụng
+
+
+def sniff_register_api(driver, timeout: float = 8.0) -> str:
+    """
+    Đọc Chrome Performance log (CDP Network events) để tìm URL API đăng ký thật.
+    Trả về URL nếu tìm thấy, chuỗi rỗng nếu không.
+    Cache kết quả vào _sniffed_api_url để các lần sau dùng lại.
+    """
+    global _sniffed_api_url
+    if _sniffed_api_url:
+        logger.info(f"[sniff] Dùng cache API URL: {_sniffed_api_url}")
+        return _sniffed_api_url
+
+    import json as _json
+    keywords = ("register", "signup", "regist", "user/add", "member/create",
+                "account/create", "dangky", "dang-ky")
+    deadline = time.time() + timeout
+    seen: set = set()
+
+    while time.time() < deadline:
+        try:
+            for entry in driver.get_log("performance"):
+                msg = _json.loads(entry["message"]).get("message", {})
+                if msg.get("method") != "Network.requestWillBeSent":
+                    continue
+                params = msg.get("params", {})
+                req    = params.get("request", {})
+                url    = req.get("url", "")
+                method = req.get("method", "")
+                if url in seen:
+                    continue
+                seen.add(url)
+                if method == "POST" and any(kw in url.lower() for kw in keywords):
+                    logger.info(f"[sniff] ✅ Tìm thấy API đăng ký: {url}")
+                    _sniffed_api_url = url
+                    return url
+        except Exception as e:
+            logger.debug(f"[sniff] Log parse lỗi: {e}")
+        time.sleep(0.4)
+
+    logger.warning(f"[sniff] Không tìm thấy API endpoint sau {timeout}s")
+    return ""
+
+
 def get_driver():
     from selenium.webdriver.chrome.service import Service
 
@@ -50,6 +95,9 @@ def get_driver():
     # Bỏ banner "Chrome is being controlled by automated software"
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+
+    # Bật Chrome Performance log để sniff XHR request (tìm API endpoint)
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     # User-Agent Chrome thật (không có "HeadlessChrome")
     options.add_argument(
@@ -136,6 +184,7 @@ def run_account_creation(
             "phone":     phone,
             "password":  password,
             "full_name": full_name,
+            "api_url":   "",   # Sẽ được điền sau khi sniff
         }
 
         # ── BƯỚC 1: ĐĂNG KÝ ──────────────────────────────────────
@@ -183,7 +232,21 @@ def run_account_creation(
                 }
             }, 800);
         """)
-        time.sleep(3)   # Chờ captcha xuất hiện
+        time.sleep(1)   # Chờ request bắt đầu gửi
+
+        # Sniff API endpoint thật từ network log
+        if progress_callback:
+            progress_callback("🔍 Đang sniff API endpoint thật...")
+        sniffed = sniff_register_api(driver, timeout=5)
+        if sniffed:
+            form_data["api_url"] = sniffed
+            if progress_callback:
+                progress_callback(f"✅ Sniff thành công: `{sniffed}`")
+        else:
+            if progress_callback:
+                progress_callback("⚠️ Không sniff được endpoint — dùng URL mặc định")
+
+        time.sleep(2)   # Chờ captcha xuất hiện
 
         # 3. Giải captcha — retry tối đa 3 lần
         MAX_CAPTCHA_RETRY = 3
