@@ -323,73 +323,237 @@ def _press_ok(driver, modal_rect: dict = None) -> bool:
 
 
 # ─────────────────────────────────────────────────────
-# HÀM CHÍNH
+# GRID CAPTCHA (dạng lưới ô vuông)
+# ─────────────────────────────────────────────────────
+def _get_grid_rect(driver) -> dict | None:
+    """Tìm captcha dạng lưới ô hình ảnh."""
+    rect = driver.execute_script(r"""
+        var selectors = [
+            '[class*="geetest_item"]', '[class*="captcha_item"]',
+            '[class*="grid"]', '[class*="task-image"]',
+            '[class*="tile"]', '[class*="cell"]'
+        ];
+        for (var s of selectors) {
+            var els = document.querySelectorAll(s);
+            if (els.length >= 4) {
+                var parent = els[0].parentElement;
+                for (var i = 0; i < 5; i++) {
+                    if (!parent) break;
+                    var r = parent.getBoundingClientRect();
+                    if (r.width > 100 && r.height > 100 && r.top > 0)
+                        return {x: r.left, y: r.top, w: r.width, h: r.height, count: els.length, selector: s};
+                    parent = parent.parentElement;
+                }
+            }
+        }
+        return null;
+    """)
+    if rect:
+        logger.info(f"Grid rect: {rect}")
+    return rect
+
+
+def giai_grid_captcha(image_path: str, rows: int = 3, cols: int = 3, hint: str = "") -> list:
+    """Gửi ảnh grid → 2captcha trả số thứ tự ô cần click (1-indexed)."""
+    if not solver:
+        return []
+    logger.info(f"Gửi Grid Captcha lên 2captcha ({rows}x{cols})...")
+    try:
+        result = solver.grid(
+            image_path,
+            hintText=hint or "Chọn tất cả các ô phù hợp với yêu cầu",
+            rows=rows,
+            cols=cols,
+        )
+        logger.info(f"Grid result: {result}")
+        code = result.get("code", "") if isinstance(result, dict) else str(result)
+        code = re.sub(r'^click:', '', code, flags=re.IGNORECASE).strip()
+        tiles = [int(x) for x in code.split(",") if x.strip().isdigit()]
+        logger.info(f"Ô cần click: {tiles}")
+        return tiles
+    except Exception as e:
+        logger.error(f"Lỗi Grid captcha: {e} ❌")
+        return []
+
+
+def _click_grid_tiles(driver, tiles: list, selector: str):
+    """Click vào các ô theo index (1-based) trong lưới grid."""
+    els = driver.find_elements("css selector", selector)
+    if not els:
+        # Fallback selector list
+        for fb in ['[class*="geetest_item"]', '[class*="task-image"]',
+                   '[class*="captcha_item"]', '[class*="tile"]']:
+            els = driver.find_elements("css selector", fb)
+            if els:
+                break
+    if not els:
+        logger.warning("Không tìm thấy ô grid để click ❌")
+        return
+
+    logger.info(f"Grid: {len(els)} ô tìm thấy, cần click: {tiles}")
+    for tile_idx in tiles:
+        arr_idx = tile_idx - 1
+        if 0 <= arr_idx < len(els):
+            try:
+                _human_sleep(0.5, 1.1)
+                els[arr_idx].click()
+                logger.info(f"  Grid click ô {tile_idx}")
+            except Exception as e:
+                logger.warning(f"  Grid click ô {tile_idx} lỗi: {e}")
+
+
+# ─────────────────────────────────────────────────────
+# PHÁT HIỆN LOẠI CAPTCHA HIỆN TẠI
+# ─────────────────────────────────────────────────────
+def _detect_captcha_type(driver) -> str:
+    """
+    Trả về: 'click_order' | 'grid' | 'none'
+    """
+    ctype = driver.execute_script(r"""
+        // Click-order: có text "Chọn theo thứ tự"
+        var tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        var node;
+        while (node = tw.nextNode()) {
+            if (node.nodeValue && node.nodeValue.includes('Chọn theo thứ tự'))
+                return 'click_order';
+        }
+        // Grid: có nhiều ô hình ảnh dạng lưới
+        var gridSels = ['[class*="geetest_item"]','[class*="captcha_item"]',
+                        '[class*="task-image"]','[class*="tile"]','[class*="cell"]'];
+        for (var s of gridSels) {
+            if (document.querySelectorAll(s).length >= 4) return 'grid';
+        }
+        return 'none';
+    """)
+    logger.info(f"Loại captcha hiện tại: {ctype}")
+    return ctype or "none"
+
+
+# ─────────────────────────────────────────────────────
+# HÀM CHÍNH — LOOP GIẢI NHIỀU CAPTCHA LIÊN TIẾP
 # ─────────────────────────────────────────────────────
 def solve_captcha_on_page(driver) -> bool:
     if not solver:
         logger.error("solver=None ❌")
         return False
 
-    time.sleep(2)
+    MAX_ROUNDS = 5   # Tối đa 5 vòng (phòng vô hạn)
+    solved_any = False
 
-    # ── Bước 1: Tìm modal CLICK CAPTCHA (ưu tiên hàng đầu) ──
-    modal = _get_modal_rect(driver)
+    for rnd in range(1, MAX_ROUNDS + 1):
+        _human_sleep(1.5, 2.5)
+        ctype = _detect_captcha_type(driver)
 
-    if modal:
-        logger.info("Tìm thấy click captcha — gửi lên 2captcha coordinates...")
-        img_path = _crop_modal_to_file(driver, modal)
-        if not img_path:
-            return False
-        try:
-            coords = giai_click_captcha(
-                image_path=img_path,
-                huong_dan="Nhấp vào các biểu tượng theo đúng thứ tự được chỉ định từ trái sang phải ở thanh trên cùng",
-            )
-        finally:
+        # ── Không còn captcha nào ──────────────────────
+        if ctype == "none":
+            if solved_any:
+                logger.info(f"✅ Đã giải xong tất cả captcha ({rnd-1} vòng)")
+            else:
+                logger.info("Không tìm thấy captcha nào")
+            break
+
+        logger.info(f"── Vòng {rnd}: giải captcha loại '{ctype}' ──")
+
+        # ── CLICK-ORDER captcha (Chọn theo thứ tự này) ─
+        if ctype == "click_order":
+            modal = _get_modal_rect(driver)
+            if not modal:
+                logger.warning("click_order nhưng không crop được modal")
+                break
+            img_path = _crop_modal_to_file(driver, modal)
+            if not img_path:
+                break
             try:
-                os.unlink(img_path)
-            except Exception:
-                pass
+                coords = giai_click_captcha(
+                    image_path=img_path,
+                    huong_dan="Nhấp vào các biểu tượng theo đúng thứ tự được chỉ định từ trái sang phải ở thanh trên cùng",
+                )
+            finally:
+                try:
+                    os.unlink(img_path)
+                except Exception:
+                    pass
 
-        if not coords:
-            logger.warning("Không lấy được tọa độ ❌")
-            return False
+            if not coords:
+                logger.warning("Không lấy được tọa độ ❌")
+                break
 
-        # Click từng tọa độ
-        _do_click(driver, coords, modal)
+            _do_click(driver, coords, modal)
+            ok_pressed = _press_ok(driver, modal)
+            logger.info("✅ Click-order hoàn tất" if ok_pressed else "⚠️ Không nhấn được OK")
+            solved_any = True
 
-        # Nhấn OK
-        ok_pressed = _press_ok(driver, modal)
-        if ok_pressed:
-            logger.info("✅ Click captcha hoàn tất (click + OK)")
-        else:
-            logger.warning("⚠️ Không nhấn được OK nhưng vẫn tiếp tục")
+        # ── GRID captcha (lưới ô hình ảnh) ─────────────
+        elif ctype == "grid":
+            grid_info = _get_grid_rect(driver)
+            selector = grid_info.get("selector", '[class*="geetest_item"]') if grid_info else '[class*="geetest_item"]'
 
-        time.sleep(2)
-        return True
+            # Crop toàn bộ grid để gửi lên 2captcha
+            modal = grid_info or _get_modal_rect(driver)
+            if not modal:
+                logger.warning("Grid nhưng không tìm thấy vùng ảnh")
+                break
+            img_path = _crop_modal_to_file(driver, modal)
+            if not img_path:
+                break
+            try:
+                # Thử đoán số hàng/cột từ số ô
+                count = grid_info.get("count", 9) if grid_info else 9
+                if count <= 4:
+                    rows, cols = 2, 2
+                elif count <= 6:
+                    rows, cols = 2, 3
+                else:
+                    rows, cols = 3, 3
 
-    # ── Bước 2: Không có click captcha → thử GeeTest V4 token ──
-    logger.info("Không tìm thấy click captcha → thử GeeTest V4...")
-    current_url = driver.current_url
-    result_v4 = giai_geetest_v4(website_url=current_url)
+                tiles = giai_grid_captcha(
+                    image_path=img_path,
+                    rows=rows, cols=cols,
+                    hint="Chọn tất cả các ô phù hợp với yêu cầu",
+                )
+            finally:
+                try:
+                    os.unlink(img_path)
+                except Exception:
+                    pass
 
-    if result_v4:
-        ok = _submit_geetest_v4(driver, result_v4)
-        if ok:
-            time.sleep(1)
-            driver.execute_script("""
-                let all = Array.from(document.querySelectorAll('div, button, span'))
-                    .filter(e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ' && e.offsetParent !== null);
-                if (all.length > 0) {
-                    let btn = all[all.length - 1];
-                    const opt = { bubbles: true, cancelable: true, view: window };
-                    btn.dispatchEvent(new MouseEvent('mousedown', opt));
-                    btn.dispatchEvent(new MouseEvent('mouseup', opt));
-                    btn.click();
-                }
-            """)
-            logger.info("✅ GeeTest V4 inject + ĐĂNG KÝ clicked")
-            return True
+            if not tiles:
+                logger.warning("Không lấy được ô grid ❌")
+                break
 
-    logger.warning("Không tìm thấy captcha nào để giải ❌")
-    return False
+            _click_grid_tiles(driver, tiles, selector)
+            _human_sleep(0.5, 1.0)
+            ok_pressed = _press_ok(driver, modal)
+            logger.info("✅ Grid hoàn tất" if ok_pressed else "⚠️ Không nhấn được OK")
+            solved_any = True
+
+    else:
+        # Đã đủ MAX_ROUNDS mà vẫn còn captcha
+        logger.warning(f"⚠️ Đã thử {MAX_ROUNDS} vòng, captcha vẫn còn")
+
+    # Nếu không còn captcha hiển thị → dùng GeeTest V4 dự phòng nếu cần
+    if not solved_any:
+        logger.info("Không tìm thấy click/grid captcha → thử GeeTest V4 dự phòng...")
+        current_url = driver.current_url
+        result_v4 = giai_geetest_v4(website_url=current_url)
+        if result_v4:
+            ok = _submit_geetest_v4(driver, result_v4)
+            if ok:
+                time.sleep(1)
+                driver.execute_script("""
+                    let all = Array.from(document.querySelectorAll('div, button, span'))
+                        .filter(e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ' && e.offsetParent !== null);
+                    if (all.length > 0) {
+                        let btn = all[all.length - 1];
+                        const opt = { bubbles: true, cancelable: true, view: window };
+                        btn.dispatchEvent(new MouseEvent('mousedown', opt));
+                        btn.dispatchEvent(new MouseEvent('mouseup', opt));
+                        btn.click();
+                    }
+                """)
+                logger.info("✅ GeeTest V4 dự phòng + ĐĂNG KÝ clicked")
+                return True
+        logger.warning("Không tìm thấy captcha nào ❌")
+        return False
+
+    return True
