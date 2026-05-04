@@ -32,17 +32,30 @@ def generate_password():
 def get_driver():
     from selenium.webdriver.chrome.service import Service
 
+    # Ngẫu nhiên kích thước cửa sổ để tránh fingerprint cố định
+    w = random.choice([1280, 1366, 1440, 1920])
+    h = random.choice([768, 800, 900, 1080])
+
     options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1280,800")
+    options.add_argument(f"--window-size={w},{h}")
     options.add_argument("--disable-extensions")
-    options.add_argument("--remote-debugging-port=9222")
+
+    # ── Chống phát hiện bot ──────────────────────────
+    # Xóa flag "navigator.webdriver = true"
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    # Bỏ banner "Chrome is being controlled by automated software"
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    # User-Agent Chrome thật (không có "HeadlessChrome")
     options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        f"AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/120.0.0.{random.randint(1,9999)} Safari/537.36"
     )
 
     chrome_bin = os.environ.get("CHROME_BIN", "")
@@ -53,10 +66,22 @@ def get_driver():
     if chromedriver_path:
         logger.info(f"Dùng chromedriver hệ thống: {chromedriver_path}")
         service = Service(executable_path=chromedriver_path)
-        return webdriver.Chrome(service=service, options=options)
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        logger.info("Dùng webdriver-manager để tìm chromedriver...")
+        driver = webdriver.Chrome(options=options)
 
-    logger.info("Dùng webdriver-manager để tìm chromedriver...")
-    return webdriver.Chrome(options=options)
+    # Ghi đè navigator.webdriver = false qua CDP
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['vi-VN','vi','en-US','en']});
+            window.chrome = { runtime: {} };
+        """
+    })
+
+    return driver
 
 
 def _screenshot_b64(driver) -> str:
