@@ -447,10 +447,31 @@ def solve_captcha_on_page(driver) -> bool:
         # ── Không còn captcha nào ──────────────────────
         if ctype == "none":
             if solved_any:
-                logger.info(f"✅ Đã giải xong tất cả captcha ({rnd-1} vòng)")
+                # Vừa giải xong captcha → click ĐĂNG KÝ để submit form
+                # (trang không tự submit sau khi bấm OK captcha)
+                logger.info(f"Vòng {rnd}: không còn captcha → click ĐĂNG KÝ để submit...")
+                _human_sleep(1.5, 2.5)   # Chờ giống người xem lại form
+                driver.execute_script("""
+                    let all = Array.from(document.querySelectorAll('div, button, span'))
+                        .filter(e => e.innerText && e.innerText.trim() === 'ĐĂNG KÝ'
+                                  && e.offsetParent !== null);
+                    if (all.length > 0) {
+                        let btn = all[all.length - 1];
+                        const opt = { bubbles: true, cancelable: true, view: window };
+                        btn.dispatchEvent(new MouseEvent('mousedown', opt));
+                        btn.dispatchEvent(new MouseEvent('mouseup',   opt));
+                        btn.click();
+                    }
+                """)
+                logger.info("ĐĂNG KÝ submit đã click — chờ phản hồi trang...")
+                _human_sleep(2.5, 3.5)
+                # Nếu trang sinh captcha mới sau submit → vòng lặp tiếp theo sẽ xử lý
+                # Nếu không có captcha mới → vòng tiếp break và return True
+                solved_any = False   # Reset để phân biệt round captcha mới vs submit xong
             else:
-                logger.info("Không tìm thấy captcha nào")
-            break
+                logger.info("Không tìm thấy captcha nào trên trang")
+                break
+            continue   # Quay lại đầu vòng để kiểm tra captcha mới (nếu có)
 
         logger.info(f"── Vòng {rnd}: giải captcha loại '{ctype}' ──")
 
