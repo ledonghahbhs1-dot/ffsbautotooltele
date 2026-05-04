@@ -1,5 +1,4 @@
 python-telegram-bot==20.7
 selenium==4.18.1
-webdriver-manager==4.0.1
 Pillow==10.3.0
 2captcha-python==2.0.6
