@@ -346,19 +346,175 @@ def check_captcha_type(driver, rect: dict = None) -> dict:
 
 
 def _detect_type_from_dom(driver, rect: dict) -> str:
-    """Wrapper tương thích ngược — trả về string type đơn giản."""
+    """Wrapper — trả về string type để xử lý trong solve_captcha_on_page."""
     info = check_captcha_type(driver, rect)
     ctype = info.get("type", "unknown")
-    # Map các loại geetest về nhóm xử lý
-    if ctype in ("geetest_v4_grid", "geetest_v3_grid"):
+    # GeeTest v4 slide/click → giữ nguyên để xử lý bằng token API
+    if ctype in ("geetest_v4_slide", "geetest_v4_click"):
+        return ctype
+    # GeeTest v4 grid / v3 grid → xử lý như grid ảnh
+    if ctype in ("geetest_v4_grid",):
         return "grid"
-    if ctype in ("geetest_v4_slide", "geetest_v3_slide", "slide"):
+    # GeeTest v3 slide/click → xử lý bằng coordinates (screenshot)
+    if ctype in ("geetest_v3_slide", "slide"):
         return "slide"
-    if ctype in ("geetest_v4_click", "geetest_v3_click", "click_order"):
+    if ctype in ("geetest_v3_click", "click_order"):
         return "click_order"
     if ctype == "grid":
         return "grid"
     return ctype  # text_captcha, recaptcha_v2, hcaptcha, unknown
+
+
+# ─────────────────────────────────────────────────────
+# GIẢI GEETEST V4 — LẤY TOKEN (không cần screenshot)
+# ─────────────────────────────────────────────────────
+def _solve_geetest_v4_token(website_url: str) -> dict | None:
+    """
+    Gọi 2captcha geetest_v4 API → trả về dict token để inject vào trang.
+    Kết quả gồm: captcha_id, lot_number, pass_token, gen_time,
+                  captcha_output, sign_token (tuỳ trang)
+    """
+    if not solver:
+        return None
+    logger.info(f"[captcha] Gửi lên 2captcha (geetest_v4) — captcha_id={GEETEST_V4_ID} url={website_url}")
+    try:
+        result = solver.geetest_v4(
+            captcha_id=GEETEST_V4_ID,
+            url=website_url,
+        )
+        logger.info(f"[captcha] GeeTest v4 token nhận được: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"[captcha] Lỗi geetest_v4: {e}")
+        return None
+
+
+def _inject_geetest_v4_token(driver, token_result: dict) -> bool:
+    """
+    Inject token GeeTest v4 vào trang bằng cách:
+      1. Gọi callback window.geetest4_xxx.reset() rồi submit token
+      2. Hoặc set trực tiếp các field hidden form
+      3. Hoặc gọi window.__gt4_callback nếu trang dùng cách đó
+    Trả về True nếu inject thành công.
+    """
+    if not token_result:
+        return False
+
+    # Chuẩn hoá key — 2captcha có thể trả về dạng nested dict hoặc flat
+    if isinstance(token_result, dict) and "code" in token_result:
+        data = token_result["code"]
+        if isinstance(data, str):
+            # Có thể dạng "captcha_id=xxx;lot_number=yyy;..."
+            parsed = {}
+            for part in data.split(";"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    parsed[k.strip()] = v.strip()
+            data = parsed if parsed else token_result
+        token_result = data if isinstance(data, dict) else token_result
+
+    lot_number     = token_result.get("lot_number", "")
+    pass_token     = token_result.get("pass_token", "")
+    gen_time       = token_result.get("gen_time", "")
+    captcha_output = token_result.get("captcha_output", "")
+    sign_token     = token_result.get("sign_token", "")
+    captcha_id     = token_result.get("captcha_id", GEETEST_V4_ID)
+
+    logger.info(
+        f"[captcha] Inject GeeTest v4 token: "
+        f"lot={lot_number[:8]}... pass={pass_token[:8]}..."
+    )
+
+    injected = driver.execute_script("""
+        var lot_number     = arguments[0];
+        var pass_token     = arguments[1];
+        var gen_time       = arguments[2];
+        var captcha_output = arguments[3];
+        var sign_token     = arguments[4];
+        var captcha_id     = arguments[5];
+
+        // Cách 1: Tìm GeeTest v4 instance qua window object
+        var gt4Keys = Object.keys(window).filter(function(k) {
+            return k.startsWith('gt4') || k.startsWith('initGeetest4') ||
+                   k.startsWith('geetest4') || k === 'captcha';
+        });
+
+        // Cách 2: Tìm callback được gắn vào element
+        var cbEl = document.querySelector('[class*="geetest4"]');
+        var submitted = false;
+
+        // Cách 3: Gọi trực tiếp window callback pattern của GeeTest v4
+        if (window.handlerGeetest4 && typeof window.handlerGeetest4 === 'function') {
+            window.handlerGeetest4({
+                lot_number: lot_number, pass_token: pass_token,
+                gen_time: gen_time, captcha_output: captcha_output,
+                sign_token: sign_token, captcha_id: captcha_id
+            });
+            submitted = true;
+        }
+
+        // Cách 4: Dispatch custom event mà trang lắng nghe
+        if (!submitted) {
+            var evt = new CustomEvent('geetest4:success', {
+                bubbles: true, cancelable: false,
+                detail: {
+                    lot_number: lot_number, pass_token: pass_token,
+                    gen_time: gen_time, captcha_output: captcha_output,
+                    sign_token: sign_token, captcha_id: captcha_id
+                }
+            });
+            document.dispatchEvent(evt);
+        }
+
+        // Cách 5: Set hidden input fields trực tiếp (nhiều trang dùng cách này)
+        var fieldMap = {
+            'lot_number': lot_number, 'pass_token': pass_token,
+            'gen_time': gen_time, 'captcha_output': captcha_output,
+            'sign_token': sign_token, 'captcha_id': captcha_id,
+            'geetest_lotNumber': lot_number, 'geetest_passToken': pass_token,
+            'geetest_genTime': gen_time, 'geetest_captchaOutput': captcha_output,
+        };
+        Object.keys(fieldMap).forEach(function(name) {
+            ['input[name="'+name+'"]', '#'+name, '[data-name="'+name+'"]'].forEach(function(sel) {
+                var el = document.querySelector(sel);
+                if (el) {
+                    el.value = fieldMap[name];
+                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                }
+            });
+        });
+
+        // Cách 6: Gọi window.__gt4_cb nếu trang gắn vào window
+        if (window.__gt4_cb && typeof window.__gt4_cb === 'function') {
+            window.__gt4_cb({
+                lot_number: lot_number, pass_token: pass_token,
+                gen_time: gen_time, captcha_output: captcha_output
+            });
+            submitted = true;
+        }
+
+        return submitted ? 'callback_called' : 'fields_set';
+    """, lot_number, pass_token, gen_time, captcha_output, sign_token, captcha_id)
+
+    logger.info(f"[captcha] Inject result: {injected}")
+    _human_sleep(1.5, 2.5)
+
+    # Kiểm tra captcha đã biến mất chưa
+    still_visible = _find_captcha_rect(driver, timeout=2)
+    if still_visible is None:
+        logger.info("[captcha] GeeTest v4 token inject thành công ✅")
+        return True
+
+    # Thử thêm: click nút xác nhận nếu vẫn còn hiển thị
+    logger.info("[captcha] Captcha vẫn còn — thử click nút xác nhận sau inject...")
+    _press_ok(driver, still_visible)
+    _human_sleep(1.5, 2.0)
+
+    final_check = _find_captcha_rect(driver, timeout=2)
+    success = final_check is None
+    logger.info(f"[captcha] GeeTest v4 inject: {'✅ thành công' if success else '⚠️ vẫn còn captcha'}")
+    return success
 
 
 # ─────────────────────────────────────────────────────
@@ -592,10 +748,41 @@ def solve_captcha_on_page(driver) -> bool:
                 break
 
         # 2. Phát hiện loại captcha chi tiết
-        captcha_info = check_captcha_type(driver, rect)
-        ctype = _detect_type_from_dom(driver, rect)  # string đơn giản để xử lý
+        ctype = _detect_type_from_dom(driver, rect)
+        current_url = driver.current_url
 
-        # 3. Chụp ảnh captcha
+        # ── GeeTest v4 (slide / click) — giải bằng TOKEN API ──────────
+        if ctype in ("geetest_v4_slide", "geetest_v4_click"):
+            logger.info(f"[captcha] GeeTest v4 ({ctype}) → dùng token API (không cần screenshot)")
+            token = _solve_geetest_v4_token(current_url)
+            if not token:
+                logger.error("[captcha] Không lấy được token GeeTest v4 ❌")
+                break
+            success = _inject_geetest_v4_token(driver, token)
+            if success:
+                solved_count += 1
+                _human_sleep(1.5, 2.5)
+                continue
+            else:
+                logger.warning("[captcha] Inject token thất bại — thử fallback coordinates...")
+                # Fallback: chụp ảnh và dùng coordinates
+                img_path = _screenshot_rect_to_file(driver, rect)
+                if img_path:
+                    try:
+                        coords = _solve_as_coordinates(img_path)
+                        if coords:
+                            _apply_coordinates(driver, coords, rect)
+                            _press_ok(driver, rect)
+                            solved_count += 1
+                    finally:
+                        try:
+                            os.unlink(img_path)
+                        except Exception:
+                            pass
+                _human_sleep(1.5, 2.5)
+                continue
+
+        # ── Các loại còn lại cần chụp ảnh ─────────────────────────────
         img_path = _screenshot_rect_to_file(driver, rect)
         if not img_path:
             logger.error("[captcha] Không chụp được ảnh ❌")
@@ -603,8 +790,8 @@ def solve_captcha_on_page(driver) -> bool:
 
         try:
             if ctype == "slide":
-                # Slide captcha: dùng coordinates để kéo
-                logger.info("[captcha] Xử lý slide — gửi lên 2captcha (coordinates)...")
+                # GeeTest v3 slide hoặc slide chung → dùng coordinates
+                logger.info("[captcha] Slide (v3/chung) → coordinates...")
                 coords = _solve_as_coordinates(img_path)
                 if coords:
                     _apply_coordinates(driver, coords, rect)
@@ -613,7 +800,6 @@ def solve_captcha_on_page(driver) -> bool:
                     break
 
             elif ctype == "grid":
-                # Thử grid trước, fallback sang coordinates nếu lỗi
                 tiles = _solve_as_grid(img_path)
                 if tiles:
                     count = driver.execute_script("""
@@ -632,11 +818,11 @@ def solve_captcha_on_page(driver) -> bool:
                         _apply_coordinates(driver, coords, rect)
 
             elif ctype in ("recaptcha_v2", "hcaptcha", "text_captcha"):
-                logger.warning(f"[captcha] Loại {ctype} chưa được hỗ trợ tự động ⚠️")
+                logger.warning(f"[captcha] Loại {ctype} chưa hỗ trợ tự động ⚠️")
                 break
 
             else:
-                # click_order hoặc unknown → dùng coordinates (worker người thật)
+                # click_order / unknown → coordinates (worker người thật)
                 coords = _solve_as_coordinates(img_path)
                 if not coords:
                     logger.warning("[captcha] Không lấy được tọa độ ❌")
