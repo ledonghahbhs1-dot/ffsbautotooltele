@@ -592,7 +592,7 @@ def _solve_geetest_v3_token(website_url: str, gt: str, challenge: str,
     try:
         kwargs = dict(gt=gt, challenge=challenge, url=website_url)
         if api_server:
-            kwargs["api_server"] = api_server
+            kwargs["apiServer"] = api_server   # SDK rename_params: apiServer → api_server
         result = solver.geetest(**kwargs)
         logger.info(f"[captcha] GeeTest v3 token OK: {str(result)[:120]}")
         return result
@@ -973,6 +973,97 @@ def _inject_hcaptcha_token(driver, token: str) -> bool:
     """, token)
     _human_sleep(0.5, 1.0)
     return True
+
+
+def _inject_geetest_v3_token(driver, token_result) -> bool:
+    """
+    Inject GeeTest v3 token vào trang.
+    2captcha trả về: {"code": "challenge=xxx;validate=yyy;seccode=zzz"}
+    Cần inject đủ 3 field riêng biệt vào DOM.
+    """
+    if not token_result:
+        return False
+    tok = _parse_token_dict(token_result)
+    # code có thể là string "challenge=xxx;validate=yyy;seccode=zzz"
+    # sau _parse_token_dict → {"challenge":"xxx","validate":"yyy","seccode":"zzz"}
+    challenge = tok.get("challenge", "")
+    validate  = tok.get("validate",  "")
+    seccode   = tok.get("seccode",   "")
+
+    # Fallback: nếu parse không ra được 3 field riêng
+    if not validate and "code" in (token_result if isinstance(token_result, dict) else {}):
+        raw = token_result["code"]
+        if isinstance(raw, str):
+            for part in raw.split(";"):
+                if "challenge=" in part:
+                    challenge = part.split("=", 1)[1]
+                elif "validate=" in part:
+                    validate  = part.split("=", 1)[1]
+                elif "seccode=" in part:
+                    seccode   = part.split("=", 1)[1]
+
+    logger.info(f"[captcha] Inject GeeTest v3: validate={validate[:16]}...")
+
+    driver.execute_script("""
+        var challenge=arguments[0], validate=arguments[1], seccode=arguments[2];
+
+        // Cách 1: set hidden input fields (cách phổ biến nhất)
+        var fieldMap = {
+            'geetest_challenge': challenge,
+            'geetest_validate':  validate,
+            'geetest_seccode':   seccode,
+            'challenge':         challenge,
+            'validate':          validate,
+            'seccode':           seccode,
+        };
+        Object.keys(fieldMap).forEach(function(name) {
+            var val = fieldMap[name];
+            ['input[name="'+name+'"]','#'+name,'[data-name="'+name+'"]','textarea[name="'+name+'"]'].forEach(function(sel){
+                var el = document.querySelector(sel);
+                if (el) {
+                    el.value = val;
+                    el.dispatchEvent(new Event('input',  {bubbles:true}));
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                }
+            });
+        });
+
+        // Cách 2: gọi callback nếu trang dùng pattern initGeetest(data, fn)
+        if (window._gt_callback && typeof window._gt_callback === 'function') {
+            window._gt_callback({
+                geetest_challenge: challenge,
+                geetest_validate:  validate,
+                geetest_seccode:   seccode,
+            });
+        }
+
+        // Cách 3: dispatch event để Vue/React components lắng nghe
+        document.dispatchEvent(new CustomEvent('geetest:success', {
+            bubbles: true,
+            detail: { challenge: challenge, validate: validate, seccode: seccode }
+        }));
+
+        // Cách 4: tìm form và submit luôn nếu có đủ field
+        var form = document.querySelector('form');
+        if (form) {
+            ['geetest_challenge','geetest_validate','geetest_seccode'].forEach(function(n, i) {
+                var vals = [challenge, validate, seccode];
+                var el = form.querySelector('[name="'+n+'"]');
+                if (!el) {
+                    el = document.createElement('input');
+                    el.type = 'hidden'; el.name = n;
+                    form.appendChild(el);
+                }
+                el.value = vals[i];
+            });
+        }
+    """, challenge, validate, seccode)
+
+    _human_sleep(0.8, 1.5)
+    still = _find_captcha_rect(driver, timeout=2)
+    success = still is None
+    logger.info(f"[captcha] GeeTest v3 inject: {'✅' if success else '⚠️ vẫn còn captcha'}")
+    return success
 
 
 def _inject_funcaptcha_token(driver, token: str) -> bool:
@@ -1432,12 +1523,13 @@ def solve_captcha_on_page(driver, form_data: dict = None,
                     progress_cb("🔑 Lấy token GeeTest v3...")
                 v3_token = _solve_geetest_v3_token(current_url, gt, challenge, api_srv)
                 if v3_token:
-                    tok = _parse_token_dict(v3_token)
-                    _inject_generic_token(driver, tok.get("geetest_validate", "") or str(tok),
-                                          ["geetest_challenge","geetest_validate","geetest_seccode"])
-                    solved_count += 1
-                    _human_sleep(1.5, 2.5)
-                    continue
+                    # GeeTest v3: 2captcha trả về challenge;validate;seccode — inject đủ 3 field
+                    if _inject_geetest_v3_token(driver, v3_token):
+                        solved_count += 1
+                        _human_sleep(1.5, 2.5)
+                        continue
+                    # Inject thất bại → fallback coordinates
+                    logger.warning("[captcha] GeeTest v3 inject thất bại → fallback ảnh")
             img_path = _screenshot_rect_to_file(driver, rect)
             if img_path:
                 try:
