@@ -30,10 +30,11 @@ from twocaptcha import TwoCaptcha
 
 logger = logging.getLogger(__name__)
 
-API_KEY  = os.getenv("TWOCAPTCHA_API_KEY")
-BASE_URL = os.getenv("BASE_URL", "https://fly88h.com")
-GEETEST_V4_ID = os.getenv("GEETEST_V4_CAPTCHA_ID", "cff289689d0273ca771b5c1ef63dc8db")
-REGISTER_URL  = f"{BASE_URL}/home/register"
+API_KEY          = os.getenv("TWOCAPTCHA_API_KEY")
+BASE_URL         = os.getenv("BASE_URL", "https://fly88h.com")
+GEETEST_V4_ID    = os.getenv("GEETEST_V4_CAPTCHA_ID", "cff289689d0273ca771b5c1ef63dc8db")
+REGISTER_URL     = f"{BASE_URL}/home/register"
+REGISTER_API_URL = os.getenv("REGISTER_API_URL", f"{BASE_URL}/api/v1/register")
 
 solver = TwoCaptcha(API_KEY) if API_KEY else None
 if not API_KEY:
@@ -363,6 +364,116 @@ def _detect_type_from_dom(driver, rect: dict) -> str:
     if ctype == "grid":
         return "grid"
     return ctype  # text_captcha, recaptcha_v2, hcaptcha, unknown
+
+
+# ─────────────────────────────────────────────────────
+# SUBMIT FORM QUA CURL_CFFI (TLS FINGERPRINT BYPASS)
+# ─────────────────────────────────────────────────────
+def _parse_token_dict(token_result: dict) -> dict:
+    """Chuẩn hoá token dict từ 2captcha (flat hoặc nested)."""
+    if not token_result:
+        return {}
+    if "code" in token_result:
+        data = token_result["code"]
+        if isinstance(data, str):
+            parsed = {}
+            for part in data.split(";"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    parsed[k.strip()] = v.strip()
+            return parsed if parsed else token_result
+        if isinstance(data, dict):
+            return data
+    return token_result
+
+
+def submit_register_curl_cffi(driver, token_result: dict, form_data: dict,
+                               progress_cb=None) -> dict:
+    """
+    Sau khi có GeeTest v4 token, submit form đăng ký trực tiếp qua HTTP
+    dùng curl_cffi impersonate Chrome120 để bypass TLS fingerprint.
+
+    form_data: {"user": str, "phone": str, "password": str, "full_name": str}
+    Trả về: {"success": bool, "status": int, "response": str}
+    """
+    try:
+        from curl_cffi import requests as curl_req
+    except ImportError:
+        logger.error("[curl_cffi] Chưa cài curl_cffi ❌ — pip install curl_cffi")
+        return {"success": False, "status": 0, "response": "curl_cffi not installed"}
+
+    if progress_cb:
+        progress_cb("🕵️ Đang submit form qua curl_cffi (bypass TLS fingerprint)...")
+
+    # Lấy cookies từ Selenium session
+    selenium_cookies = {}
+    try:
+        for c in driver.get_cookies():
+            selenium_cookies[c["name"]] = c["value"]
+        logger.info(f"[curl_cffi] Lấy {len(selenium_cookies)} cookies từ Selenium")
+    except Exception as e:
+        logger.warning(f"[curl_cffi] Lấy cookies thất bại: {e}")
+
+    token = _parse_token_dict(token_result)
+    lot_number     = token.get("lot_number", "")
+    pass_token     = token.get("pass_token", "")
+    gen_time       = token.get("gen_time", "")
+    captcha_output = token.get("captcha_output", "")
+
+    payload = {
+        "username":       form_data.get("user", ""),
+        "password":       form_data.get("password", ""),
+        "phone":          form_data.get("phone", ""),
+        "fullname":       form_data.get("full_name", "").upper(),
+        "captcha_id":     GEETEST_V4_ID,
+        "lot_number":     lot_number,
+        "pass_token":     pass_token,
+        "gen_time":       gen_time,
+        "captcha_output": captcha_output,
+    }
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept":       "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Referer":      REGISTER_URL,
+        "Origin":       BASE_URL,
+    }
+
+    logger.info(f"[curl_cffi] POST → {REGISTER_API_URL} | user={payload['username']}")
+    try:
+        session = curl_req.Session()
+        for name, value in selenium_cookies.items():
+            session.cookies.set(name, value)
+
+        resp = session.post(
+            REGISTER_API_URL,
+            json=payload,
+            headers=headers,
+            impersonate="chrome120",
+            timeout=30,
+        )
+        body = resp.text[:500]
+        logger.info(f"[curl_cffi] Response {resp.status_code}: {body}")
+
+        body_lower = body.lower()
+        success = resp.status_code in (200, 201) and any(
+            kw in body_lower for kw in ('"success":true', '"code":0', '"status":1',
+                                        '"ok":true', '"result":1')
+        )
+        if progress_cb:
+            icon = "✅" if success else "⚠️"
+            progress_cb(f"{icon} curl_cffi: HTTP {resp.status_code} | {body[:80]}")
+
+        return {"success": success, "status": resp.status_code, "response": body}
+    except Exception as e:
+        logger.error(f"[curl_cffi] Lỗi: {e}")
+        if progress_cb:
+            progress_cb(f"❌ curl_cffi lỗi: {e}")
+        return {"success": False, "status": 0, "response": str(e)}
 
 
 # ─────────────────────────────────────────────────────
@@ -707,7 +818,17 @@ def _press_ok(driver, rect: dict = None) -> bool:
 # ─────────────────────────────────────────────────────
 # HÀM CHÍNH
 # ─────────────────────────────────────────────────────
-def solve_captcha_on_page(driver) -> bool:
+def solve_captcha_on_page(driver, form_data: dict = None,
+                          progress_cb=None) -> bool:
+    """
+    Giải captcha trên trang hiện tại.
+
+    form_data (tuỳ chọn): {"user", "phone", "password", "full_name"}
+      → Nếu truyền vào, khi gặp GeeTest v4 sẽ thử submit form trực tiếp
+        qua curl_cffi sau khi lấy token (nhanh hơn & đáng tin cậy hơn inject).
+
+    progress_cb (tuỳ chọn): callback(str) để gửi tiến trình về Telegram.
+    """
     if not solver:
         logger.error("[captcha] solver=None ❌")
         return False
@@ -753,11 +874,32 @@ def solve_captcha_on_page(driver) -> bool:
 
         # ── GeeTest v4 (slide / click) — giải bằng TOKEN API ──────────
         if ctype in ("geetest_v4_slide", "geetest_v4_click"):
-            logger.info(f"[captcha] GeeTest v4 ({ctype}) → dùng token API (không cần screenshot)")
+            logger.info(f"[captcha] GeeTest v4 ({ctype}) → dùng token API 2captcha...")
+            if progress_cb:
+                progress_cb(f"🔑 Đang lấy token GeeTest v4 ({ctype}) từ 2captcha...")
             token = _solve_geetest_v4_token(current_url)
             if not token:
                 logger.error("[captcha] Không lấy được token GeeTest v4 ❌")
                 break
+
+            # ── Ưu tiên: submit form trực tiếp qua curl_cffi ──
+            if form_data:
+                logger.info("[captcha] Có form_data → thử submit qua curl_cffi...")
+                http_result = submit_register_curl_cffi(
+                    driver, token, form_data, progress_cb=progress_cb
+                )
+                if http_result.get("success"):
+                    logger.info("[captcha] curl_cffi submit thành công ✅")
+                    return True          # Đăng ký xong — thoát ngay
+                else:
+                    logger.warning(
+                        f"[captcha] curl_cffi thất bại ({http_result.get('status')}) "
+                        f"— thử inject token vào browser..."
+                    )
+                    if progress_cb:
+                        progress_cb("⚠️ curl_cffi chưa được, thử inject token vào browser...")
+
+            # ── Fallback: inject token vào browser ──────────────
             success = _inject_geetest_v4_token(driver, token)
             if success:
                 solved_count += 1
@@ -765,7 +907,9 @@ def solve_captcha_on_page(driver) -> bool:
                 continue
             else:
                 logger.warning("[captcha] Inject token thất bại — thử fallback coordinates...")
-                # Fallback: chụp ảnh và dùng coordinates
+                if progress_cb:
+                    progress_cb("⚠️ Inject token chưa được, thử giải bằng ảnh...")
+                # Fallback cuối: chụp ảnh và dùng coordinates
                 img_path = _screenshot_rect_to_file(driver, rect)
                 if img_path:
                     try:
