@@ -7,7 +7,7 @@ Luồng chính:
   3. Click từng điểm → nhấn OK
   4. Nếu không tìm thấy click captcha → thử GeeTest V4 token
 """
-import os, base64, json, re, time, logging, tempfile
+import os, base64, json, re, time, random, logging, tempfile
 from io import BytesIO
 from PIL import Image
 from selenium.webdriver.common.by import By
@@ -191,6 +191,11 @@ def _crop_modal_to_file(driver, rect: dict) -> str | None:
 # ─────────────────────────────────────────────────────
 # CLICK CÁC TỌA ĐỘ
 # ─────────────────────────────────────────────────────
+def _human_sleep(min_s: float, max_s: float):
+    """Nghỉ ngẫu nhiên giống người thật."""
+    time.sleep(random.uniform(min_s, max_s))
+
+
 def _do_click(driver, coords: list, modal_rect: dict) -> bool:
     if not coords:
         logger.warning("Không có tọa độ click")
@@ -200,22 +205,42 @@ def _do_click(driver, coords: list, modal_rect: dict) -> bool:
     full = driver.get_screenshot_as_png()
     dpr  = Image.open(BytesIO(full)).width / vp_w if vp_w else 1.0
 
+    # Nghỉ nhỏ trước khi bắt đầu click (giống người nhìn ảnh trước)
+    _human_sleep(0.4, 0.9)
+
     for idx, (cx, cy) in enumerate(coords):
-        px = int(modal_rect["x"] + cx / dpr)
-        py = int(modal_rect["y"] + cy / dpr)
+        # Jitter nhỏ ±3px để không click đúng pixel — giống người thật
+        jitter_x = random.randint(-3, 3)
+        jitter_y = random.randint(-3, 3)
+        px = int(modal_rect["x"] + cx / dpr) + jitter_x
+        py = int(modal_rect["y"] + cy / dpr) + jitter_y
         logger.info(f"  Click {idx+1}: crop({cx},{cy}) → viewport({px},{py})")
+
+        # mousedown giữ 80-180ms rồi mới mouseup (giống tay người)
+        hold_ms = random.randint(80, 180)
         driver.execute_script(
             "var e=document.elementFromPoint(arguments[0],arguments[1]);"
             "if(e){"
+            "  e.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:arguments[0],clientY:arguments[1]}));"
             "  e.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,clientX:arguments[0],clientY:arguments[1]}));"
+            "}",
+            px, py,
+        )
+        time.sleep(hold_ms / 1000)
+        driver.execute_script(
+            "var e=document.elementFromPoint(arguments[0],arguments[1]);"
+            "if(e){"
             "  e.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,clientX:arguments[0],clientY:arguments[1]}));"
             "  e.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:arguments[0],clientY:arguments[1]}));"
             "}",
             px, py,
         )
-        time.sleep(1.0)
 
-    time.sleep(1.5)
+        # Nghỉ giữa các click: 0.7–1.6 giây (giống người suy nghĩ)
+        _human_sleep(0.7, 1.6)
+
+    # Nghỉ thêm trước khi nhấn OK (giống người kiểm tra lại)
+    _human_sleep(0.5, 1.2)
     return True
 
 
